@@ -150,14 +150,24 @@ const DISCOVERY_SHOW_TIMEOUT_MS = 5000;
 const DISCOVERY_MODEL_INFO_TIMEOUT_MS = 10000;
 
 /**
- * Outcome of the `/model/info` probe. Distinguished so the discovery log can
- * say what actually happened — a 401 from a misconfigured key and a 404 from
- * a non-LiteLLM server both mean "no metadata", but only one is actionable.
+ * Timeout for the gateway's daily-usage endpoint. A quick counter read, polled
+ * in the background — it must never hold a request slot for the full chat
+ * `requestTimeout`.
  */
-export type LiteLLMModelInfoProbe =
+const USAGE_FETCH_TIMEOUT_MS = 10000;
+
+/**
+ * Outcome of an optional JSON `GET` probe (`/model/info`, the usage
+ * endpoint). Distinguished so callers can say what actually happened — a 401
+ * from a misconfigured key and a 404 from a server without the endpoint both
+ * mean "no data", but only one is actionable.
+ */
+export type JsonProbeResult =
   | { readonly kind: 'ok'; readonly body: unknown }
   | { readonly kind: 'http'; readonly status: number }
   | { readonly kind: 'unreachable'; readonly reason: string };
+
+export type LiteLLMModelInfoProbe = JsonProbeResult;
 
 const SSE_DATA_PREFIX = 'data: ';
 const SSE_DONE_LINE = 'data: [DONE]';
@@ -668,20 +678,42 @@ export class GatewayClient {
   public async fetchLiteLLMModelInfo(
     cancellationToken?: vscode.CancellationToken
   ): Promise<LiteLLMModelInfoProbe> {
+    return this.probeJson('/model/info', DISCOVERY_MODEL_INFO_TIMEOUT_MS, cancellationToken);
+  }
+
+  /**
+   * Fetch today's token usage from the gateway's usage endpoint (`path`, e.g.
+   * `/v1/usage/current`, joined onto the normalized server URL). Returns the
+   * raw JSON body — parsing lives in `status/dailyUsage` — or the failure
+   * kind, so a 404 from a server without the endpoint can be told apart from
+   * an auth or network problem.
+   */
+  public async fetchCurrentUsage(
+    path: string,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<JsonProbeResult> {
+    return this.probeJson(path, USAGE_FETCH_TIMEOUT_MS, cancellationToken);
+  }
+
+  private async probeJson(
+    path: string,
+    timeoutMs: number,
+    cancellationToken?: vscode.CancellationToken
+  ): Promise<JsonProbeResult> {
     const base = normalizeBaseUrl(this.config.serverUrl);
     try {
       const response = await this.fetchWithTimeout(
-        `${base}/model/info`,
+        `${base}${path}`,
         { method: 'GET', headers: this.getHeaders() },
         cancellationToken,
-        DISCOVERY_MODEL_INFO_TIMEOUT_MS
+        timeoutMs
       );
       if (!response.ok) { return { kind: 'http', status: response.status }; }
       return { kind: 'ok', body: await response.json() };
     } catch (error) {
       const reason = error instanceof Error && error.name === 'AbortError'
-        ? `timed out after ${DISCOVERY_MODEL_INFO_TIMEOUT_MS}ms or cancelled`
-        : error instanceof Error ? error.message : String(error);
+        ? `timed out after ${timeoutMs}ms or cancelled`
+        : describeFetchError(error);
       return { kind: 'unreachable', reason };
     }
   }

@@ -5,6 +5,7 @@ import { TokenUsage } from './sessionStats';
 import { extractHost } from './format';
 import { StatusSnapshot } from './statusSnapshot';
 import { renderStatusTooltipHtml } from './statusTooltip';
+import { UsageLevel, summarizeDailyUsage } from './dailyUsage';
 
 /** How long the "responded" pulse stays in the bar before reverting to idle. */
 const RESPONDED_DISPLAY_MS = 10_000;
@@ -166,17 +167,34 @@ export class StatusBarManager implements vscode.Disposable {
     // "is the gateway up" signal. All the rich data goes into the hover
     // tooltip, which is the closest stable-API approximation to GHCP's
     // floating popup (`chatStatusItem` is proposed-API-only).
-    const { text } = renderStatusBar(this.state);
+    const snapshot = this.getSnapshot();
+    const { text, level } = renderStatusBar(this.state, summarizeDailyUsage(snapshot.dailyUsage));
     this.item.text = text;
+    this.item.backgroundColor = levelBackground(level);
     // Tooltip renders as the GHCP-style popup: HTML card with theme icons,
     // section headers, and command-link buttons. MarkdownString runs the value
     // through VS Code's hover renderer, which is the closest stable-API path
     // to a click-triggered floating popup (`chatStatusItem` is proposed-only).
-    const tooltipHtml = renderStatusTooltipHtml(this.getSnapshot());
+    const tooltipHtml = renderStatusTooltipHtml(snapshot);
     const md = new vscode.MarkdownString(tooltipHtml);
     md.isTrusted = true;
     md.supportThemeIcons = true;
     md.supportHtml = true;
     this.item.tooltip = md;
+  }
+}
+
+/**
+ * Status-bar items only honour the two themed warning/error backgrounds, so
+ * the quota levels map straight onto them; `ok` restores the default.
+ */
+function levelBackground(level: UsageLevel | undefined): vscode.ThemeColor | undefined {
+  switch (level) {
+    case 'warning':
+      return new vscode.ThemeColor('statusBarItem.warningBackground');
+    case 'critical':
+      return new vscode.ThemeColor('statusBarItem.errorBackground');
+    default:
+      return undefined;
   }
 }

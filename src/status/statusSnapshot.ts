@@ -4,6 +4,7 @@
  * formatting helpers can be unit-tested without the editor.
  */
 
+import { DailyUsageView } from './dailyUsage';
 import { formatTokenCount } from './format';
 import { SessionStats, TokenUsage } from './sessionStats';
 
@@ -45,6 +46,8 @@ export interface StatusSnapshot {
   readonly sessionStats: SessionStats;
   readonly lastRequest?: LastRequestInfo;
   readonly features: FeatureFlags;
+  /** Gateway-reported daily token quota (`usageEndpoint`) and the warning thresholds. */
+  readonly dailyUsage: DailyUsageView;
   /** Injected so relative-time output is deterministic in tests. */
   readonly now: number;
 }

@@ -209,6 +209,14 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
     inlineCompletionMaxPrefixChars: 4000,
     inlineCompletionMaxSuffixChars: 2000,
     showReplyTokenUsage: true,
+
+    usageEndpoint: '/v1/usage/current',
+
+    usageRefreshInterval: 300,
+
+    usageWarningPercent: 20,
+
+    usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
   };
 
@@ -273,5 +281,71 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
       'data: [DONE]',
     ]);
     assert.deepEqual(reasoning, ['thought']);
+  });
+});
+
+describe('fetchCurrentUsage', () => {
+  // The client only reads connection fields; the rest of GatewayConfig is irrelevant here.
+  const config = {
+    serverUrl: 'http://gateway:8000/v1/',
+    apiKey: 'secret',
+    requestTimeout: 60000,
+    customHeaders: { 'X-Team': 'core' },
+  } as unknown as import('../../config/gatewayConfig').GatewayConfig;
+
+  async function withFetch<T>(
+    impl: (url: string, init: RequestInit) => Promise<Response>,
+    run: () => Promise<T>
+  ): Promise<T> {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = ((url: string, init: RequestInit) => impl(url, init)) as typeof fetch;
+    try {
+      return await run();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  test('GETs the path on the normalized base URL with auth and custom headers', async () => {
+    const seen: Array<{ url: string; init: RequestInit }> = [];
+    const result = await withFetch(
+      async (url, init) => {
+        seen.push({ url, init });
+        return new Response(JSON.stringify({ remaining_tokens: 5 }), { status: 200 });
+      },
+      () => new GatewayClient(config).fetchCurrentUsage('/v1/usage/current')
+    );
+    assert.deepEqual(result, { kind: 'ok', body: { remaining_tokens: 5 } });
+    assert.equal(seen[0].url, 'http://gateway:8000/v1/usage/current');
+    assert.equal(seen[0].init.method, 'GET');
+    const headers = seen[0].init.headers as Record<string, string>;
+    assert.equal(headers['Authorization'], 'Bearer secret');
+    assert.equal(headers['X-Team'], 'core');
+  });
+
+  test('reports non-2xx responses by status', async () => {
+    const result = await withFetch(
+      async () => new Response('not found', { status: 404 }),
+      () => new GatewayClient(config).fetchCurrentUsage('/v1/usage/current')
+    );
+    assert.deepEqual(result, { kind: 'http', status: 404 });
+  });
+
+  test('reports network failures with the underlying cause', async () => {
+    const result = await withFetch(
+      async () => {
+        throw Object.assign(new TypeError('fetch failed'), { cause: new Error('connect ECONNREFUSED') });
+      },
+      () => new GatewayClient(config).fetchCurrentUsage('/v1/usage/current')
+    );
+    assert.deepEqual(result, { kind: 'unreachable', reason: 'fetch failed: connect ECONNREFUSED' });
+  });
+
+  test('reports a non-JSON body as unreachable rather than throwing', async () => {
+    const result = await withFetch(
+      async () => new Response('<html>', { status: 200 }),
+      () => new GatewayClient(config).fetchCurrentUsage('/v1/usage/current')
+    );
+    assert.equal(result.kind, 'unreachable');
   });
 });

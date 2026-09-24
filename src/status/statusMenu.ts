@@ -17,6 +17,13 @@
 import { formatTokenCount } from './format';
 import { formatRelativeTime } from './sessionStats';
 import { StatusSnapshot } from './statusSnapshot';
+import {
+  UsageLevel,
+  formatFetchedLabel,
+  formatResetLabel,
+  summarizeDailyUsage,
+  usedRatio,
+} from './dailyUsage';
 
 /** Boolean settings the menu can flip, keyed by their setting name. */
 export type ToggleSetting =
@@ -50,6 +57,9 @@ export const STATUS_MENU_COMMANDS = {
   EditHeaders: 'github.copilot.llm-gateway.editCustomHeaders',
   OpenSettings: 'workbench.action.openSettings',
 } as const;
+
+/** Re-fetches the daily quota; bound to the usage rows, which only appear when the gateway reports usage. */
+export const REFRESH_USAGE_COMMAND = 'github.copilot.llm-gateway.refreshUsage';
 
 const SETTINGS_QUERY = 'github.copilot.llm-gateway';
 /** Models listed in the menu before collapsing to "and N more". */
@@ -170,6 +180,78 @@ function sessionItems(snapshot: StatusSnapshot): StatusMenuItem[] {
   return items;
 }
 
+const USAGE_LEVEL_ICON: Record<UsageLevel, string> = {
+  ok: '$(pulse)',
+  warning: '$(warning)',
+  critical: '$(error)',
+};
+
+/**
+ * Daily quota rows: remaining tokens (the headline, with a meter) and the
+ * in/out/total breakdown. Both re-fetch the numbers when picked. Empty when
+ * the gateway has no usage endpoint.
+ */
+function dailyUsageItems(snapshot: StatusSnapshot): StatusMenuItem[] {
+  const summary = summarizeDailyUsage(snapshot.dailyUsage);
+  if (!summary) {
+    return [];
+  }
+  const refresh = REFRESH_USAGE_COMMAND;
+  const sample = summary.sample;
+  if (!sample) {
+    return [
+      separator('Daily usage'),
+      {
+        label: '$(warning) Usage unavailable',
+        description: 'Select to retry',
+        ...(summary.errorMessage ? { detail: summary.errorMessage } : {}),
+        action: { kind: 'command', command: refresh },
+      },
+    ];
+  }
+
+  const { usage } = sample;
+  const ratio = usedRatio(usage);
+  const headline =
+    usage.remainingTokens <= 0
+      ? 'Daily limit reached'
+      : `${usage.remainingTokens.toLocaleString()} tokens left`;
+  const meter =
+    ratio === undefined
+      ? undefined
+      : `${renderTextMeter(ratio)}  ${Math.min(100, Math.round(ratio * 100))}% used`;
+  const requests =
+    usage.requestCount === undefined
+      ? ''
+      : `${usage.requestCount} request${usage.requestCount === 1 ? '' : 's'}`;
+  const freshness = summary.errorMessage
+    ? `$(warning) Refresh failed: ${summary.errorMessage} · showing numbers ${formatFetchedLabel(sample, snapshot.now)}`
+    : formatFetchedLabel(sample, snapshot.now);
+
+  return [
+    separator('Daily usage'),
+    {
+      label: `${USAGE_LEVEL_ICON[summary.level]} ${headline}`,
+      description: [`of ${formatTokenCount(usage.dailyLimit)}`, formatResetLabel(usage, snapshot.now)]
+        .filter(Boolean)
+        .join(' · '),
+      ...(meter ? { detail: meter } : {}),
+      action: { kind: 'command', command: refresh },
+    },
+    {
+      label: '$(arrow-swap) Used today',
+      description: [
+        `${formatTokenCount(usage.totalTokens)} tokens (${formatTokenCount(usage.inputTokens)} in / ${formatTokenCount(usage.outputTokens)} out)`,
+        requests,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      detail: freshness,
+      action: { kind: 'command', command: refresh },
+    },
+  ];
+}
+
 function modelItems(snapshot: StatusSnapshot): StatusMenuItem[] {
   const shown = snapshot.models.slice(0, STATUS_MENU_MODEL_LIST_MAX);
   const items: StatusMenuItem[] = shown.map((model) => ({
@@ -215,7 +297,8 @@ function actionItems(): StatusMenuItem[] {
 
 /**
  * Build the full menu for a snapshot. Sections mirror the hover popup so the
- * two surfaces read the same: connection, session, models, features, actions.
+ * two surfaces read the same: connection, daily usage, session, models,
+ * features, actions.
  */
 export function buildStatusMenu(snapshot: StatusSnapshot): StatusMenuItem[] {
   const modelSection =
@@ -225,6 +308,7 @@ export function buildStatusMenu(snapshot: StatusSnapshot): StatusMenuItem[] {
   return [
     separator(snapshot.host || 'LLM Gateway'),
     ...connectionItems(snapshot),
+    ...dailyUsageItems(snapshot),
     separator('Session'),
     ...sessionItems(snapshot),
     ...modelSection,

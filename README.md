@@ -143,6 +143,27 @@ A status-bar entry (bottom-right) shows the gateway's connection state at a glan
 
 ![LLM Gateway status info dialog](assets/screenshot-status-dialog.png)
 
+#### Daily token quota
+
+If your gateway enforces a daily token limit and exposes it at `GET /v1/usage/current`, the status bar shows **how many tokens you have left today** (e.g. `2.6M left`) in place of the host name. It turns **yellow** when the remaining quota drops to 20% of the daily limit or below, and **red** once it is used up (`limit reached`). The hover popup and the status menu gain a **Daily usage** section with the remaining and total tokens, a meter, today's input / output / total tokens and request count, and when the quota resets. Clicking a usage row in the menu re-fetches the numbers.
+
+The endpoint must return JSON with at least `remaining_tokens` (or `daily_limit` and `total_tokens`); `input_tokens`, `output_tokens`, `request_count` and `reset_time` are shown when present:
+
+```json
+{ "input_tokens": 9100000, "output_tokens": 3300000, "total_tokens": 12400000,
+  "daily_limit": 15000000, "remaining_tokens": 2600000,
+  "request_count": 311, "reset_time": "2026-09-25T00:00:00Z" }
+```
+
+Usage refreshes shortly after each chat request, every 5 minutes in the background (skipped while VS Code is unfocused), right after `reset_time`, and on **Refresh Models** / **Refresh Daily Usage**. It uses the same API key and custom headers as chat requests. Servers without the endpoint (vLLM, Ollama, llama.cpp, …) answer 404 once and nothing changes.
+
+| Setting                    | Default             | Description                                                                                                  |
+| -------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Usage Endpoint**         | `/v1/usage/current` | Path of the usage endpoint, joined onto the Server URL. Must be a path, not a full URL. Empty turns it off. |
+| **Usage Refresh Interval** | `300`               | Seconds between background refreshes (minimum 30). `0` refreshes only after requests and on demand.         |
+| **Usage Warning Percent**  | `20`                | Status bar turns yellow at or below this percentage of the daily limit remaining.                           |
+| **Usage Critical Percent** | `0`                 | Status bar turns red at or below this percentage remaining. It is always red once the limit is reached.     |
+
 ### Using your models in the Agents window (Preview)
 
 VS Code 1.120+ adds the **Agents window** — a separate window for running multiple
@@ -505,6 +526,7 @@ Access from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 | **GitHub Copilot LLM Gateway: Edit Custom Headers**    | Add, edit, or remove custom HTTP headers (stored in secret storage) |
 | **GitHub Copilot LLM Gateway: Show Output Log**        | Open the extension's output channel                                 |
 | **GitHub Copilot LLM Gateway: Set Thinking Effort**    | Pick a model and a reasoning-effort level to send with every request |
+| **GitHub Copilot LLM Gateway: Refresh Daily Usage**    | Re-fetch the gateway's daily token quota shown in the status bar    |
 
 ## Reply Token Summary
 
@@ -528,6 +550,7 @@ This extension is a **Language Model provider** — it registers alongside GitHu
 ### What this extension controls
 
 - **Chat inference** — When you select an LLM Gateway model, all prompts, code snippets, and tool calls are sent exclusively to your configured server. None of this traffic touches GitHub.
+- **Daily usage polling** — a small `GET` to your configured server's usage endpoint (default `/v1/usage/current`) to show the remaining daily quota. It carries only your API key and custom headers, never prompt content, and stops after a single 404 on servers without the endpoint. Clear **Usage Endpoint** to turn it off.
 
 ### What this extension does NOT control
 

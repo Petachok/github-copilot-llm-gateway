@@ -74,11 +74,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   /**
    * Probe the gateway silently (no error toast) and render the result in the
-   * status bar. Uses the provider's cached fetch so it doesn't double-hit the
+   * status bar, fetching the daily usage quota in parallel. Uses the provider's cached fetch so it doesn't double-hit the
    * server when VS Code is already asking for models.
    */
   const refreshStatusBar = async (): Promise<void> => {
     const cts = new vscode.CancellationTokenSource();
+    // The daily-usage quota refreshes alongside the model probe; it re-renders
+    // the bar through the snapshot event when it lands.
+    const usageRefresh = provider.refreshUsage();
     try {
       const models = await provider.provideLanguageModelChatInformation(
         { silent: true },
@@ -93,6 +96,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       statusManager.setError(error instanceof Error ? error.message : String(error));
     } finally {
       cts.dispose();
+      await usageRefresh;
     }
   };
 

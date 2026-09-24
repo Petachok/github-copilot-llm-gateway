@@ -33,6 +33,14 @@ function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     inlineCompletionMaxPrefixChars: 4000,
     inlineCompletionMaxSuffixChars: 1000,
     showReplyTokenUsage: true,
+
+    usageEndpoint: '/v1/usage/current',
+
+    usageRefreshInterval: 300,
+
+    usageWarningPercent: 20,
+
+    usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
     ...overrides,
   };
