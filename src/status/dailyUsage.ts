@@ -221,6 +221,15 @@ export function formatResetLabel(usage: DailyUsage, now: number): string {
   return `resets in ${Math.floor(hours / 24)}d`;
 }
 
+/** "42 requests" / "1 request", or `''` when the gateway didn't report a count. */
+export function formatRequestCount(count: number | undefined): string {
+  if (count === undefined) {
+    return '';
+  }
+  const noun = count === 1 ? 'request' : 'requests';
+  return `${count.toLocaleString()} ${noun}`;
+}
+
 /** "as of 3m ago" freshness label for a sample. */
 export function formatFetchedLabel(sample: DailyUsageSample, now: number): string {
   return `as of ${formatRelativeTime(sample.fetchedAt, now)}`;

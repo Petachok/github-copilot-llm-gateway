@@ -167,8 +167,6 @@ export type JsonProbeResult =
   | { readonly kind: 'http'; readonly status: number }
   | { readonly kind: 'unreachable'; readonly reason: string };
 
-export type LiteLLMModelInfoProbe = JsonProbeResult;
-
 const SSE_DATA_PREFIX = 'data: ';
 const SSE_DONE_LINE = 'data: [DONE]';
 const ERROR_PREFIX = 'Inference server reported an error mid-stream: ';
@@ -677,7 +675,7 @@ export class GatewayClient {
    */
   public async fetchLiteLLMModelInfo(
     cancellationToken?: vscode.CancellationToken
-  ): Promise<LiteLLMModelInfoProbe> {
+  ): Promise<JsonProbeResult> {
     return this.probeJson('/model/info', DISCOVERY_MODEL_INFO_TIMEOUT_MS, cancellationToken);
   }
 

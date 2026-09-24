@@ -4,6 +4,7 @@ import {
   DEFAULT_USAGE_THRESHOLDS,
   DailyUsage,
   formatRemainingLabel,
+  formatRequestCount,
   formatResetLabel,
   parseDailyUsage,
   resolveUsagePath,
@@ -145,6 +146,13 @@ describe('labels', () => {
     assert.equal(formatRemainingLabel(usage({ remainingTokens: 14_412_300, dailyLimit: 15_000_000 })), '14M left');
     assert.equal(formatRemainingLabel(usage({ remainingTokens: 412_300 })), '412k left');
     assert.equal(formatRemainingLabel(usage({ remainingTokens: 0 })), 'limit reached');
+  });
+
+  test('request count pluralizes and is empty when unreported', () => {
+    assert.equal(formatRequestCount(1), '1 request');
+    assert.equal(formatRequestCount(0), '0 requests');
+    assert.equal(formatRequestCount(1234), '1,234 requests');
+    assert.equal(formatRequestCount(undefined), '');
   });
 
   test('reset label counts down in hours and minutes', () => {

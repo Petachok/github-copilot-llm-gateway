@@ -20,6 +20,7 @@ import { StatusSnapshot } from './statusSnapshot';
 import {
   UsageLevel,
   formatFetchedLabel,
+  formatRequestCount,
   formatResetLabel,
   summarizeDailyUsage,
   usedRatio,
@@ -220,10 +221,7 @@ function dailyUsageItems(snapshot: StatusSnapshot): StatusMenuItem[] {
     ratio === undefined
       ? undefined
       : `${renderTextMeter(ratio)}  ${Math.min(100, Math.round(ratio * 100))}% used`;
-  const requests =
-    usage.requestCount === undefined
-      ? ''
-      : `${usage.requestCount} request${usage.requestCount === 1 ? '' : 's'}`;
+  const requests = formatRequestCount(usage.requestCount);
   const freshness = summary.errorMessage
     ? `$(warning) Refresh failed: ${summary.errorMessage} · showing numbers ${formatFetchedLabel(sample, snapshot.now)}`
     : formatFetchedLabel(sample, snapshot.now);

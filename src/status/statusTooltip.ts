@@ -42,6 +42,7 @@ import {
 import {
   UsageLevel,
   formatFetchedLabel,
+  formatRequestCount,
   formatResetLabel,
   summarizeDailyUsage,
   usedRatio,
@@ -220,9 +221,11 @@ function renderDailyUsage(snapshot: StatusSnapshot): string {
   if (!summary) {
     return '';
   }
-  const errorRow = summary.errorMessage
-    ? `<tr><td colspan="2">$(warning)&nbsp;${mutedSpan(esc(`Usage unavailable: ${summary.errorMessage}`))}</td></tr>`
-    : '';
+  let errorRow = '';
+  if (summary.errorMessage) {
+    const errorLabel = mutedSpan(esc(`Usage unavailable: ${summary.errorMessage}`));
+    errorRow = `<tr><td colspan="2">$(warning)&nbsp;${errorLabel}</td></tr>`;
+  }
   const sample = summary.sample;
   if (!sample) {
     return [
@@ -240,29 +243,26 @@ function renderDailyUsage(snapshot: StatusSnapshot): string {
     `<strong>${esc(usage.remainingTokens.toLocaleString())}</strong>`,
     LEVEL_TEXT_COLOR[summary.level]
   );
-  const requests =
-    usage.requestCount === undefined
-      ? ''
-      : mutedSpan(esc(`${usage.requestCount.toLocaleString()} request${usage.requestCount === 1 ? '' : 's'}`));
+  const requestCount = formatRequestCount(usage.requestCount);
+  const requests = requestCount ? mutedSpan(esc(requestCount)) : '';
+  const limitLabel = mutedSpan(esc(`remaining of ${usage.dailyLimit.toLocaleString()}`));
   const rows = [
     '<tr>',
-    `<td>${remaining}&nbsp;${mutedSpan(esc(`remaining of ${usage.dailyLimit.toLocaleString()}`))}</td>`,
+    `<td>${remaining}&nbsp;${limitLabel}</td>`,
     `<td align="right">${requests}</td>`,
     '</tr>',
   ];
   const ratio = usedRatio(usage);
   if (ratio !== undefined) {
     const pct = Math.min(100, Math.round(ratio * 100));
-    rows.push(
-      `<tr><td colspan="2">${renderUsageBar(ratio, LEVEL_BAR_FILL[summary.level])} ${mutedSpan(`${pct}% used`)}</td></tr>`
-    );
+    const bar = renderUsageBar(ratio, LEVEL_BAR_FILL[summary.level]);
+    const pctLabel = mutedSpan(`${pct}% used`);
+    rows.push(`<tr><td colspan="2">${bar} ${pctLabel}</td></tr>`);
   }
-  rows.push(
-    `<tr><td colspan="2">${mutedSpan(
-      `$(arrow-up) ${esc(usage.inputTokens.toLocaleString())} in · $(arrow-down) ${esc(usage.outputTokens.toLocaleString())} out · ${esc(usage.totalTokens.toLocaleString())} total`
-    )}</td></tr>`,
-    errorRow
+  const breakdown = mutedSpan(
+    `$(arrow-up) ${esc(usage.inputTokens.toLocaleString())} in · $(arrow-down) ${esc(usage.outputTokens.toLocaleString())} out · ${esc(usage.totalTokens.toLocaleString())} total`
   );
+  rows.push(`<tr><td colspan="2">${breakdown}</td></tr>`, errorRow);
   return [
     '\n<hr>\n',
     `<table width="100%"><tr><td><strong>Daily usage</strong></td><td align="right">${mutedSpan(esc(headerSide))}</td></tr></table>`,
