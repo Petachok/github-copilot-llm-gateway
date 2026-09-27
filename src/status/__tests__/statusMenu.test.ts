@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  REFRESH_USAGE_COMMAND,
   STATUS_MENU_COMMANDS,
   STATUS_MENU_MODEL_LIST_MAX,
   StatusMenuItem,
@@ -9,6 +10,7 @@ import {
 } from '../statusMenu';
 import { StatusSnapshot } from '../statusSnapshot';
 import { makeStatusSnapshot } from './snapshotFixture';
+import { DEFAULT_USAGE_THRESHOLDS, DailyUsageState } from '../dailyUsage';
 
 const FIXED_NOW = 1_700_000_000_000;
 
@@ -214,5 +216,70 @@ describe('renderTextMeter', () => {
 
   test('shows at least one cell for tiny usage', () => {
     assert.equal(renderTextMeter(0.001, 10), '█░░░░░░░░░');
+  });
+});
+
+describe('buildStatusMenu daily usage rows', () => {
+  const usage = {
+    inputTokens: 401_200,
+    outputTokens: 186_500,
+    totalTokens: 587_700,
+    dailyLimit: 1_000_000,
+    remainingTokens: 412_300,
+    requestCount: 42,
+    resetAt: FIXED_NOW + (9 * 60 + 12) * 60_000,
+  };
+  const sample = { usage, fetchedAt: FIXED_NOW - 60_000 };
+
+  function menuWith(state: DailyUsageState): StatusMenuItem[] {
+    return buildStatusMenu(
+      makeSnapshot({ dailyUsage: { state, thresholds: DEFAULT_USAGE_THRESHOLDS } })
+    );
+  }
+
+  test('adds a Daily usage section right after the connection row', () => {
+    const headers = menuWith({ kind: 'ok', ...sample })
+      .filter((item) => item.separator)
+      .map((item) => item.label);
+    assert.deepEqual(headers, ['localhost:8000', 'Daily usage', 'Session', 'Models (1)', 'Features', 'Actions']);
+  });
+
+  test('leads with the remaining tokens, limit, reset and a meter', () => {
+    const row = find(menuWith({ kind: 'ok', ...sample }), 'tokens left');
+    assert.equal(row.label, '$(pulse) 412,300 tokens left');
+    assert.equal(row.description, 'of 1.0M · resets in 9h 12m');
+    assert.ok(row.detail?.endsWith('59% used'));
+    assert.deepEqual(row.action, { kind: 'command', command: REFRESH_USAGE_COMMAND });
+  });
+
+  test('breaks down the tokens and requests used today', () => {
+    const row = find(menuWith({ kind: 'ok', ...sample }), 'Used today');
+    assert.equal(row.description, '588k tokens (401k in / 187k out) · 42 requests');
+    assert.equal(row.detail, 'as of 1m ago');
+  });
+
+  test('flags a low or exhausted quota', () => {
+    const low = menuWith({ kind: 'ok', ...sample, usage: { ...usage, remainingTokens: 50_000 } });
+    assert.ok(find(low, 'tokens left').label.startsWith('$(warning)'));
+    const out = menuWith({ kind: 'ok', ...sample, usage: { ...usage, remainingTokens: 0 } });
+    assert.equal(find(out, 'limit reached').label, '$(error) Daily limit reached');
+  });
+
+  test('marks stale numbers after a failed refresh', () => {
+    const row = find(menuWith({ kind: 'error', message: 'HTTP 502', last: sample }), 'Used today');
+    assert.ok(row.detail?.includes('Refresh failed: HTTP 502'));
+  });
+
+  test('offers a retry when nothing was ever fetched', () => {
+    const row = find(menuWith({ kind: 'error', message: 'not authorized (HTTP 401)' }), 'Usage unavailable');
+    assert.equal(row.detail, 'not authorized (HTTP 401)');
+    assert.deepEqual(row.action, { kind: 'command', command: REFRESH_USAGE_COMMAND });
+  });
+
+  test('is omitted for servers without the endpoint', () => {
+    const headers = menuWith({ kind: 'unsupported', status: 404 })
+      .filter((item) => item.separator)
+      .map((item) => item.label);
+    assert.ok(!headers.includes('Daily usage'));
   });
 });

@@ -100,6 +100,11 @@
         "command": "github.copilot.llm-gateway.showStatusMenu",
         "title": "Show Status Menu",
         "category": "GitHub Copilot LLM Gateway"
+      },
+      {
+        "command": "github.copilot.llm-gateway.refreshUsage",
+        "title": "Refresh Daily Usage",
+        "category": "GitHub Copilot LLM Gateway"
       }
     ],
     "configuration": {
@@ -262,6 +267,35 @@
           "default": false,
           "markdownDescription": "Append a `Tokens: input … | output … | total …` line to the end of each reply, summing this gateway's server-reported usage across that reply's internal tool-call rounds (a completed reply, not the whole chat). Off by default so replies look like native Copilot output — the same numbers are available from the status bar menu and VS Code's context-window widget. Requires the installed Copilot Chat build to supply private, unstable per-request identity fields; if it doesn't, no line is added and nothing else changes.",
           "order": 22
+        },
+        "github.copilot.llm-gateway.usageEndpoint": {
+          "type": "string",
+          "default": "/v1/usage/current",
+          "markdownDescription": "Path of the gateway's daily token-usage endpoint, joined onto the Server URL. When it answers with `remaining_tokens` (plus `daily_limit`, `input_tokens`, `output_tokens`, `total_tokens`), the status bar shows the tokens left today and the hover / menu show the full breakdown. Servers without the endpoint answer 404 once and nothing is shown. Must be a path, not a full URL, so your API key is never sent to another host. Leave empty to turn the feature off.",
+          "order": 23
+        },
+        "github.copilot.llm-gateway.usageRefreshInterval": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "markdownDescription": "Seconds between background refreshes of the daily usage (minimum 30). Usage is also refreshed shortly after every chat request and when the quota resets. Set to `0` to refresh only after requests and on demand.",
+          "order": 24
+        },
+        "github.copilot.llm-gateway.usageWarningPercent": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "The status bar turns **yellow** when the remaining daily tokens are at or below this percentage of the daily limit.",
+          "order": 25
+        },
+        "github.copilot.llm-gateway.usageCriticalPercent": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 100,
+          "markdownDescription": "The status bar turns **red** when the remaining daily tokens are at or below this percentage of the daily limit. `0` means red only once the limit is reached (it is always red then).",
+          "order": 26
         }
       }
     }

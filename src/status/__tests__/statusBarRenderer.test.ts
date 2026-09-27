@@ -310,3 +310,44 @@ describe('renderStatusBar — exhaustiveness', () => {
     }
   });
 });
+
+describe('renderStatusBar — daily usage', () => {
+  const idle: StatusBarState = { kind: 'idle', host: 'gateway:8000', modelCount: 2, modelIds: ['a', 'b'] };
+  const usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 587_700,
+    dailyLimit: 1_000_000,
+    remainingTokens: 412_300,
+  };
+
+  test('replaces the host with the remaining tokens', () => {
+    const r = renderStatusBar(idle, { sample: { usage, fetchedAt: 0 }, level: 'ok' });
+    assert.equal(r.text, '$(vm-active) 412k left');
+    assert.equal(r.level, 'ok');
+  });
+
+  test('keeps the disconnected icon while the gateway is unreachable', () => {
+    const r = renderStatusBar(
+      { kind: 'error', host: 'gateway:8000', errorMessage: 'ECONNREFUSED' },
+      { sample: { usage, fetchedAt: 0 }, level: 'warning', errorMessage: 'ECONNREFUSED' }
+    );
+    assert.equal(r.text, '$(vm-disconnect) 412k left');
+    assert.equal(r.level, 'warning');
+  });
+
+  test('says so when the limit is reached', () => {
+    const r = renderStatusBar(idle, {
+      sample: { usage: { ...usage, remainingTokens: 0 }, fetchedAt: 0 },
+      level: 'critical',
+    });
+    assert.equal(r.text, '$(vm-active) limit reached');
+    assert.equal(r.level, 'critical');
+  });
+
+  test('falls back to the host when there is no sample', () => {
+    assert.equal(renderStatusBar(idle).text, '$(vm-active) gateway');
+    assert.equal(renderStatusBar(idle, { level: 'ok', errorMessage: 'HTTP 500' }).text, '$(vm-active) gateway');
+    assert.equal(renderStatusBar(idle).level, undefined);
+  });
+});

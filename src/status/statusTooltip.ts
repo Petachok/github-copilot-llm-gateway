@@ -39,6 +39,14 @@ import {
   ModelSummary,
   StatusSnapshot,
 } from './statusSnapshot';
+import {
+  UsageLevel,
+  formatFetchedLabel,
+  formatRequestCount,
+  formatResetLabel,
+  summarizeDailyUsage,
+  usedRatio,
+} from './dailyUsage';
 
 /** Commands referenced by the popup's footer action links. */
 export const TOOLTIP_COMMANDS = {
@@ -93,6 +101,7 @@ export function renderStatusTooltipHtml(snapshot: StatusSnapshot): string {
   return [
     renderHeader(snapshot),
     renderConnection(snapshot),
+    renderDailyUsage(snapshot),
     renderSession(snapshot),
     renderLastRequest(snapshot),
     renderModels(snapshot),
@@ -187,6 +196,80 @@ function describeConnection(snapshot: StatusSnapshot): ConnectionDescriptor {
   }
 }
 
+/** Text colour (CSS variable suffix) for a quota level; `undefined` keeps the theme default. */
+const LEVEL_TEXT_COLOR: Record<UsageLevel, string | undefined> = {
+  ok: undefined,
+  warning: '-editorWarning-foreground',
+  critical: '-errorForeground',
+};
+
+/** Progress-bar fill for a quota level — the normal bar colour until it gets low. */
+const LEVEL_BAR_FILL: Record<UsageLevel, string> = {
+  ok: '-progressBar-background',
+  warning: '-editorWarning-foreground',
+  critical: '-errorForeground',
+};
+
+/**
+ * Gateway-reported daily quota. Sits right under the connection row because
+ * remaining tokens decide whether the agent can keep working at all. Hidden
+ * when the gateway has no usage endpoint; when the latest fetch failed, the
+ * last good numbers stay with a muted error line.
+ */
+function renderDailyUsage(snapshot: StatusSnapshot): string {
+  const summary = summarizeDailyUsage(snapshot.dailyUsage);
+  if (!summary) {
+    return '';
+  }
+  let errorRow = '';
+  if (summary.errorMessage) {
+    const errorLabel = mutedSpan(esc(`Usage unavailable: ${summary.errorMessage}`));
+    errorRow = `<tr><td colspan="2">$(warning)&nbsp;${errorLabel}</td></tr>`;
+  }
+  const sample = summary.sample;
+  if (!sample) {
+    return [
+      '\n<hr>\n',
+      '<strong>Daily usage</strong>',
+      `<table width="100%">${errorRow}</table>`,
+    ].join('');
+  }
+
+  const { usage } = sample;
+  const headerSide = [formatResetLabel(usage, snapshot.now), formatFetchedLabel(sample, snapshot.now)]
+    .filter(Boolean)
+    .join(' · ');
+  const remaining = coloredSpan(
+    `<strong>${esc(usage.remainingTokens.toLocaleString())}</strong>`,
+    LEVEL_TEXT_COLOR[summary.level]
+  );
+  const requestCount = formatRequestCount(usage.requestCount);
+  const requests = requestCount ? mutedSpan(esc(requestCount)) : '';
+  const limitLabel = mutedSpan(esc(`remaining of ${usage.dailyLimit.toLocaleString()}`));
+  const rows = [
+    '<tr>',
+    `<td>${remaining}&nbsp;${limitLabel}</td>`,
+    `<td align="right">${requests}</td>`,
+    '</tr>',
+  ];
+  const ratio = usedRatio(usage);
+  if (ratio !== undefined) {
+    const pct = Math.min(100, Math.round(ratio * 100));
+    const bar = renderUsageBar(ratio, LEVEL_BAR_FILL[summary.level]);
+    const pctLabel = mutedSpan(`${pct}% used`);
+    rows.push(`<tr><td colspan="2">${bar} ${pctLabel}</td></tr>`);
+  }
+  const breakdown = mutedSpan(
+    `$(arrow-up) ${esc(usage.inputTokens.toLocaleString())} in · $(arrow-down) ${esc(usage.outputTokens.toLocaleString())} out · ${esc(usage.totalTokens.toLocaleString())} total`
+  );
+  rows.push(`<tr><td colspan="2">${breakdown}</td></tr>`, errorRow);
+  return [
+    '\n<hr>\n',
+    `<table width="100%"><tr><td><strong>Daily usage</strong></td><td align="right">${mutedSpan(esc(headerSide))}</td></tr></table>`,
+    `<table width="100%">${rows.join('')}</table>`,
+  ].join('');
+}
+
 function renderSession(snapshot: StatusSnapshot): string {
   const s = snapshot.sessionStats;
   if (s.requestCount === 0) {
@@ -278,16 +361,17 @@ function renderLastRequest(snapshot: StatusSnapshot): string {
  *
  * Takes the raw ratio (not a rounded percent) so tiny usage like 0.01% still
  * renders one filled cell — otherwise the caller's display rounding wipes
- * out the visual signal.
+ * out the visual signal. `fillColorVar` (suffix after `--vscode`) lets the
+ * daily-quota bar turn warning/error coloured as the quota runs low.
  */
-function renderUsageBar(ratio: number): string {
+function renderUsageBar(ratio: number, fillColorVar = '-progressBar-background'): string {
   const clamped = Math.max(0, Math.min(1, ratio));
   const raw = clamped * PROGRESS_BAR_WIDTH;
   const filled = clamped > 0 ? Math.max(1, Math.round(raw)) : 0;
   const empty = PROGRESS_BAR_WIDTH - filled;
   const filledSpan =
     filled > 0
-      ? `<span style="background-color:var(--vscode-progressBar-background);">${'&nbsp;'.repeat(filled)}</span>`
+      ? `<span style="background-color:var(--vscode${fillColorVar});">${'&nbsp;'.repeat(filled)}</span>`
       : '';
   const emptySpan =
     empty > 0

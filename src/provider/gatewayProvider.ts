@@ -33,6 +33,7 @@ import { LiteLLMDiscovery } from '../discovery/litellmDiscovery';
 import { OllamaDiscovery } from '../discovery/ollamaDiscovery';
 import { ModelDiscovery } from '../discovery/types';
 import { SecretsManager } from './secretsManager';
+import { UsageService } from './usageService';
 import { promptOpenSettings } from './notifications';
 import { countMessageTokens } from './vscodeParts';
 
@@ -95,6 +96,7 @@ export class GatewayProvider
   private readonly discovery: ModelDiscovery;
   private readonly chatHandler: ChatRequestHandler;
   private readonly inlineCompletions: InlineCompletionService;
+  private readonly usage: UsageService;
   /**
    * Latest API-key override supplied by VS Code's framework-managed
    * `configuration` schema (the `chatProvider@4` proposed API used by native
@@ -169,7 +171,13 @@ export class GatewayProvider
       catalog: this.catalog,
       getConfig: () => this.config,
       log,
-      onRequestState: (event) => this._onDidChangeRequestState.fire(event),
+      onRequestState: (event) => {
+        this._onDidChangeRequestState.fire(event);
+        // Failed requests count too: a 429 may be the quota running out.
+        if (event.kind !== 'start') {
+          this.usage.refreshSoon();
+        }
+      },
       onCompleted: (modelId, modelName, usage) =>
         this.recordCompletedRequest(modelId, modelName, usage),
       showOutput: () => this.outputChannel.show(),
@@ -180,9 +188,18 @@ export class GatewayProvider
       getDefaultModelId: () => this.catalog.getCachedModels()[0]?.id,
       log,
     });
+    this.usage = new UsageService({
+      client: this.client,
+      getConfig: () => this.config,
+      log,
+      onStatusChanged: () => this._onDidChangeStatusSnapshot.fire(),
+      isWindowFocused: () => vscode.window.state.focused,
+    });
 
     context.subscriptions.push(
       this.outputChannel,
+      this.usage,
+      vscode.window.onDidChangeWindowState((e) => this.usage.onWindowFocusChanged(e.focused)),
       this._onDidChangeLanguageModelChatInformation,
       this._onDidChangeRequestState,
       this._onDidChangeStatusSnapshot,
@@ -388,6 +405,15 @@ export class GatewayProvider
   }
 
   /**
+   * Re-fetch the gateway's daily usage quota now. Called by the activation
+   * probe and the Refresh / Test Connection commands — unlike the background
+   * poll, it re-checks an endpoint that previously answered 404.
+   */
+  public refreshUsage(): Promise<void> {
+    return this.usage.refresh();
+  }
+
+  /**
    * Open the extension's output channel. Exposed so the status dialog's
    * "Open output log" button can show the panel without the controller
    * having to reach into the provider's internals.
@@ -443,6 +469,13 @@ export class GatewayProvider
         inlineCompletionModel: this.config.inlineCompletionModel,
         agentTemperature: this.config.agentTemperature,
       },
+      dailyUsage: {
+        state: this.usage.getState(),
+        thresholds: {
+          warningPercent: this.config.usageWarningPercent,
+          criticalPercent: this.config.usageCriticalPercent,
+        },
+      },
       now: Date.now(),
     };
   }
@@ -478,6 +511,10 @@ export class GatewayProvider
     // and neither does the cached backend detection.
     this.catalog.clearLearnedContexts();
     this.discovery.reset();
+    // Drops the quota numbers only when server/endpoint/credentials changed.
+    this.usage.onConfigChanged();
     this.outputChannel.appendLine('Configuration reloaded');
+    // Thresholds and feature flags live in the snapshot — re-render the bar.
+    this._onDidChangeStatusSnapshot.fire();
   }
 }

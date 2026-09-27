@@ -52,4 +52,16 @@ export interface GatewayConfig {
    * (no line, no error) when they're absent. See replyTokenUsage.ts.
    */
   showReplyTokenUsage: boolean;
+  /**
+   * Path of the gateway's daily-usage endpoint, joined onto `serverUrl`.
+   * Empty disables the status-bar quota display. Servers without the
+   * endpoint answer 404 once and the display stays hidden.
+   */
+  usageEndpoint: string;
+  /** Seconds between background usage polls; 0 polls only after requests / on refresh. */
+  usageRefreshInterval: number;
+  /** Remaining-quota percent at or below which the status bar turns yellow. */
+  usageWarningPercent: number;
+  /** Remaining-quota percent at or below which the status bar turns red. */
+  usageCriticalPercent: number;
 }

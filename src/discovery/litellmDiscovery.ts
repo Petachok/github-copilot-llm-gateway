@@ -1,5 +1,5 @@
 import type { CancellationToken } from 'vscode';
-import type { LiteLLMModelInfoProbe } from '../api/client';
+import type { JsonProbeResult } from '../api/client';
 import { DiscoveredModelInfo, ModelDiscovery } from './types';
 
 /**
@@ -136,7 +136,7 @@ export function toDiscoveredModelInfo(info: LiteLLMModelInfo): DiscoveredModelIn
 /** The subset of the gateway client the discovery probe needs. */
 export interface LiteLLMDiscoveryClient {
   /** `GET /model/info` — the raw JSON body, or how the request failed. */
-  fetchLiteLLMModelInfo(token?: CancellationToken): Promise<LiteLLMModelInfoProbe>;
+  fetchLiteLLMModelInfo(token?: CancellationToken): Promise<JsonProbeResult>;
 }
 
 /**
@@ -147,7 +147,7 @@ export interface LiteLLMDiscoveryClient {
  * different backend.
  */
 export function describeProbeOutcome(
-  probe: LiteLLMModelInfoProbe,
+  probe: JsonProbeResult,
   parsed: Map<string, LiteLLMModelInfo> | undefined
 ): string {
   if (parsed) {
@@ -206,7 +206,7 @@ export class LiteLLMDiscovery implements ModelDiscovery {
     if (!this.infoByModelName) {
       const load = this.deps.client
         .fetchLiteLLMModelInfo(token)
-        .catch((error: unknown): LiteLLMModelInfoProbe => ({
+        .catch((error: unknown): JsonProbeResult => ({
           kind: 'unreachable',
           reason: error instanceof Error ? error.message : String(error),
         }))

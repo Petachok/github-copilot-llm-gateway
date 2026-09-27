@@ -35,6 +35,9 @@ export function registerCommands(
             cts.token
           );
 
+          // Re-check the quota too — this also retries an endpoint that
+          // answered 404 earlier.
+          void provider.refreshUsage();
           if (models.length > 0) {
             statusManager.setIdle(models.map((m) => m.id));
             vscode.window.showInformationMessage(
@@ -105,6 +108,12 @@ export function registerCommands(
         provider.refreshModels();
         await refreshStatusBar();
       }
+    ),
+
+    // Re-fetch the gateway's daily token quota (usageEndpoint). Bound to the
+    // status menu's usage rows; also usable from the palette.
+    vscode.commands.registerCommand('github.copilot.llm-gateway.refreshUsage', () =>
+      provider.refreshUsage()
     )
   );
 }

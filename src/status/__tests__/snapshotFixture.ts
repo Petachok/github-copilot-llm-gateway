@@ -5,6 +5,7 @@
 
 import { StatusSnapshot } from '../statusSnapshot';
 import { emptySessionStats } from '../sessionStats';
+import { DEFAULT_USAGE_THRESHOLDS } from '../dailyUsage';
 
 export function makeStatusSnapshot(
   now: number,
@@ -32,6 +33,7 @@ export function makeStatusSnapshot(
       inlineCompletionModel: '',
       agentTemperature: 0,
     },
+    dailyUsage: { state: { kind: 'unknown' }, thresholds: DEFAULT_USAGE_THRESHOLDS },
     now,
     ...overrides,
   };

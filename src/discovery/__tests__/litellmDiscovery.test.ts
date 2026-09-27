@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CancellationToken } from 'vscode';
-import type { LiteLLMModelInfoProbe } from '../../api/client';
+import type { JsonProbeResult } from '../../api/client';
 import {
   LiteLLMDiscovery,
   LiteLLMDiscoveryClient,
@@ -137,7 +137,7 @@ function cancelledToken(): CancellationToken {
 }
 
 function fakeClient(
-  probe: LiteLLMModelInfoProbe
+  probe: JsonProbeResult
 ): { client: LiteLLMDiscoveryClient; counters: { fetches: number } } {
   const counters = { fetches: 0 };
   const client: LiteLLMDiscoveryClient = {
@@ -149,9 +149,9 @@ function fakeClient(
   return { client, counters };
 }
 
-const NOT_FOUND: LiteLLMModelInfoProbe = { kind: 'http', status: 404 };
+const NOT_FOUND: JsonProbeResult = { kind: 'http', status: 404 };
 
-const LITELLM_BODY: LiteLLMModelInfoProbe = {
+const LITELLM_BODY: JsonProbeResult = {
   kind: 'ok',
   body: {
     data: [
@@ -247,13 +247,13 @@ describe('LiteLLMDiscovery', () => {
   });
 
   test('reset() during an in-flight cancelled load does not clobber the new generation', async () => {
-    let resolveFirst: (probe: LiteLLMModelInfoProbe) => void = () => undefined;
+    let resolveFirst: (probe: JsonProbeResult) => void = () => undefined;
     let calls = 0;
     const client: LiteLLMDiscoveryClient = {
       fetchLiteLLMModelInfo: () => {
         calls += 1;
         return calls === 1
-          ? new Promise<LiteLLMModelInfoProbe>((resolve) => { resolveFirst = resolve; })
+          ? new Promise<JsonProbeResult>((resolve) => { resolveFirst = resolve; })
           : Promise.resolve(LITELLM_BODY);
       },
     };

@@ -11,6 +11,7 @@
 
 import { TokenUsage } from './sessionStats';
 import { stripPort } from './format';
+import { DailyUsageSummary, UsageLevel, formatRemainingLabel } from './dailyUsage';
 
 /**
  * Discriminated union of every state the status bar can be in. Each variant
@@ -58,6 +59,12 @@ export interface StatusBarRender {
    * `vscode.MarkdownString` with `supportThemeIcons = true`.
    */
   readonly tooltip: string;
+  /**
+   * Daily-quota warning level when the bar is showing remaining tokens. The
+   * manager maps `warning` / `critical` onto the status-bar item's warning
+   * and error background colours.
+   */
+  readonly level?: UsageLevel;
 }
 
 /** Max model ids listed in the tooltip preview before we collapse to "and N more". */
@@ -74,9 +81,34 @@ const ICON_DISCONNECTED = '$(vm-disconnect)';
 
 /**
  * Render a status-bar text + tooltip for the given state. Exhaustive on the
- * union so adding a new variant is a compile error until handled here.
+ * union so adding a new variant is a compile error until handled here. When
+ * the gateway reports a daily quota, the text shows the remaining tokens
+ * instead of the host.
  */
-export function renderStatusBar(state: StatusBarState): StatusBarRender {
+export function renderStatusBar(
+  state: StatusBarState,
+  dailyUsage?: DailyUsageSummary
+): StatusBarRender {
+  const render = renderState(state);
+  const usage = dailyUsage?.sample?.usage;
+  if (!dailyUsage || !usage) {
+    return render;
+  }
+  // Remaining tokens is the number users need at a glance, so it replaces
+  // the host in the bar; the host is still in the hover popup's header.
+  return {
+    ...render,
+    text: `${stateIcon(state)} ${formatRemainingLabel(usage)}`,
+    level: dailyUsage.level,
+  };
+}
+
+/** Connection icon for a state — the bar's "is the gateway up" light. */
+function stateIcon(state: StatusBarState): string {
+  return state.kind === 'probing' || state.kind === 'error' ? ICON_DISCONNECTED : ICON_CONNECTED;
+}
+
+function renderState(state: StatusBarState): StatusBarRender {
   switch (state.kind) {
     case 'probing':
       return renderProbing(state);

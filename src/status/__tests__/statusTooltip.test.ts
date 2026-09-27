@@ -7,6 +7,7 @@ import {
 } from '../statusTooltip';
 import { StatusSnapshot } from '../statusSnapshot';
 import { makeStatusSnapshot } from './snapshotFixture';
+import { DEFAULT_USAGE_THRESHOLDS, DailyUsageState } from '../dailyUsage';
 
 const FIXED_NOW = 2_000_000_000_000;
 
@@ -478,5 +479,89 @@ describe('renderStatusTooltipHtml — footer', () => {
     assert.ok(match, 'expected encoded Open settings link');
     const decoded = JSON.parse(decodeURIComponent(match![1]));
     assert.equal(decoded, 'github.copilot.llm-gateway');
+  });
+});
+
+describe('renderStatusTooltipHtml — daily usage', () => {
+  const usage = {
+    inputTokens: 401_200,
+    outputTokens: 186_500,
+    totalTokens: 587_700,
+    dailyLimit: 1_000_000,
+    remainingTokens: 412_300,
+    requestCount: 42,
+    resetAt: FIXED_NOW + (9 * 60 + 12) * 60_000,
+  };
+  const sample = { usage, fetchedAt: FIXED_NOW - 60_000 };
+
+  function withUsage(state: DailyUsageState): string {
+    return renderStatusTooltipHtml(
+      makeSnapshot({ dailyUsage: { state, thresholds: DEFAULT_USAGE_THRESHOLDS } })
+    );
+  }
+
+  test('is hidden until the gateway reports usage', () => {
+    const hidden: DailyUsageState[] = [
+      { kind: 'unknown' },
+      { kind: 'disabled' },
+      { kind: 'unsupported', status: 404 },
+    ];
+    for (const state of hidden) {
+      assert.ok(!withUsage(state).includes('Daily usage'), state.kind);
+    }
+  });
+
+  test('shows remaining, limit, meter, breakdown, requests and reset', () => {
+    const html = withUsage({ kind: 'ok', ...sample });
+    assert.ok(html.includes('<strong>412,300</strong>'));
+    assert.ok(html.includes('remaining of 1,000,000'));
+    assert.ok(html.includes('59% used'));
+    assert.ok(html.includes('401,200 in'));
+    assert.ok(html.includes('186,500 out'));
+    assert.ok(html.includes('587,700 total'));
+    assert.ok(html.includes('42 requests'));
+    assert.ok(html.includes('resets in 9h 12m · as of 1m ago'));
+  });
+
+  test('sits between the connection row and the models list', () => {
+    const html = withUsage({ kind: 'ok', ...sample });
+    const usageAt = html.indexOf('Daily usage');
+    assert.ok(usageAt > html.indexOf('Connected'));
+    assert.ok(usageAt < html.indexOf('<strong>Models</strong>'));
+  });
+
+  test('turns the number and bar warning-coloured when low, error-coloured when exhausted', () => {
+    const low = withUsage({ kind: 'ok', ...sample, usage: { ...usage, remainingTokens: 100_000 } });
+    assert.ok(low.includes('color:var(--vscode-editorWarning-foreground);"><strong>100,000'));
+    assert.ok(low.includes('background-color:var(--vscode-editorWarning-foreground);'));
+    const out = withUsage({ kind: 'ok', ...sample, usage: { ...usage, remainingTokens: 0 } });
+    assert.ok(out.includes('color:var(--vscode-errorForeground);"><strong>0'));
+    assert.ok(out.includes('background-color:var(--vscode-errorForeground);'));
+    const fine = withUsage({ kind: 'ok', ...sample });
+    assert.ok(fine.includes('background-color:var(--vscode-progressBar-background);'));
+  });
+
+  test('keeps stale numbers with an escaped error line after a failed refresh', () => {
+    const html = withUsage({ kind: 'error', message: '<b>HTTP 500</b>', last: sample });
+    assert.ok(html.includes('<strong>412,300</strong>'));
+    assert.ok(html.includes('Usage unavailable: &lt;b&gt;HTTP 500&lt;/b&gt;'));
+  });
+
+  test('shows just the error when nothing was ever fetched', () => {
+    const html = withUsage({ kind: 'error', message: 'not authorized (HTTP 401)' });
+    assert.ok(html.includes('<strong>Daily usage</strong>'));
+    assert.ok(html.includes('Usage unavailable: not authorized (HTTP 401)'));
+    assert.ok(!html.includes('remaining of'));
+  });
+
+  test('every style it emits passes the hover sanitizer', () => {
+    for (const remainingTokens of [412_300, 100_000, 0]) {
+      const html = withUsage({ kind: 'ok', ...sample, usage: { ...usage, remainingTokens } });
+      for (const entry of collectStyleAttrs(html)) {
+        const [tag, style] = entry.split('|');
+        assert.equal(tag, 'span', entry);
+        assert.match(style, ALLOWED_STYLE_REGEX, entry);
+      }
+    }
   });
 });
