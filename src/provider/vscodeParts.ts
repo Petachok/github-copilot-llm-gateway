@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import {
   convertMessage,
+  decodeTextData,
   flattenToolResultContent,
+  isTextMimeType,
   NormalizedMessage,
   NormalizedPart,
   NormalizedRole,
@@ -94,6 +96,10 @@ function classifyPartDuckTyped(part: unknown, log: Logger): NormalizedPart {
       input: anyPart.input,
     };
   }
+  if (typeof anyPart.mimeType === 'string' && anyPart.data instanceof Uint8Array) {
+    log(`  Found data part (duck-typed): mimeType=${anyPart.mimeType}`);
+    return { kind: 'image', mimeType: anyPart.mimeType, data: anyPart.data };
+  }
   return { kind: 'unknown' };
 }
 
@@ -115,6 +121,8 @@ export function countMessageTokens(message: vscode.LanguageModelChatMessage): nu
     } else if (part instanceof vscode.LanguageModelToolResultPart) {
       const body = flattenToolResultContent(part.content);
       tokens += estimateTextTokens(body);
+    } else if (part instanceof vscode.LanguageModelDataPart && isTextMimeType(part.mimeType)) {
+      tokens += estimateTextTokens(decodeTextData(part.data));
     } else if (part instanceof vscode.LanguageModelDataPart) {
       // Images don't map cleanly to tokens — reserve a conservative fixed
       // overhead so multimodal requests aren't massively undercounted.
