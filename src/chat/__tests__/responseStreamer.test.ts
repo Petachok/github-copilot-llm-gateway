@@ -49,6 +49,126 @@ const identityArgs = (tc: { arguments: string }): Record<string, unknown> => {
   }
 };
 
+describe('streamResponse repetition guard', () => {
+  const LOOP = 'I need to re-read the file before I can answer this. ';
+
+  test('stops a repeating response, closes the upstream stream, and explains', async () => {
+    const { reporter, events } = makeReporter();
+    let produced = 0;
+    let closed = false;
+    async function* looping(): AsyncIterable<StreamChunk> {
+      try {
+        for (; produced < 500; produced++) {
+          yield { content: LOOP };
+        }
+      } finally {
+        closed = true;
+      }
+    }
+    const stats = await streamResponse({
+      chunks: looping(),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    assert.ok(produced < 500, `consumed all ${produced} chunks`);
+    assert.equal(closed, true);
+    const last = events[events.length - 1];
+    assert.equal(last.kind, 'text');
+    assert.match(last.value ?? '', /repeating/);
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('closes a looping reasoning block before the note, with no budget fallback', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter(Array.from({ length: 200 }, () => ({ reasoning_content: LOOP }))),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+      maxOutputTokens: 1000,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    const texts = events.filter((e) => e.kind === 'text');
+    assert.equal(texts.length, 1);
+    assert.match(texts[0].value ?? '', /repeating/);
+    const doneIndex = events.findIndex((e) => e.kind === 'thinkingDone');
+    assert.ok(doneIndex >= 0 && doneIndex < events.indexOf(texts[0]));
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('stopping inside a <think> block does not add the budget fallback', async () => {
+    const { reporter, events } = makeReporter();
+    const chunks: StreamChunk[] = [{ content: '<think>' }, ...Array.from({ length: 200 }, () => ({ content: LOOP }))];
+    const stats = await streamResponse({
+      chunks: iter(chunks),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    const texts = events.filter((e) => e.kind === 'text');
+    assert.equal(texts.length, 1);
+    assert.doesNotMatch(texts[0].value ?? '', /budget/);
+  });
+
+  test('does not stop when detection is off', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter(Array.from({ length: 100 }, () => ({ content: LOOP }))),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+    });
+    assert.ok(!stats.repetitionStopped);
+    assert.equal(events.filter((e) => e.kind === 'text').length, 100);
+  });
+});
+
+describe('streamResponse tool-call withholding', () => {
+  const toolCallChunk: StreamChunk = {
+    finished_tool_calls: [{ id: 'c1', name: 'read_file', arguments: '{"filePath":"a.ts"}' }],
+  };
+
+  test('withholds tool calls and explains when nothing else was said', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([toolCallChunk]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      dropToolCalls: true,
+    });
+    assert.equal(stats.totalToolCalls, 0);
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.equal(events.some((e) => e.kind === 'toolCall'), false);
+    const texts = events.filter((e) => e.kind === 'text');
+    assert.equal(texts.length, 1);
+    assert.match(texts[0].value ?? '', /tried to call a tool/);
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('keeps a text answer without adding a note', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ content: 'Here is what I found.' }, toolCallChunk]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      dropToolCalls: true,
+    });
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.deepEqual(
+      events.filter((e) => e.kind === 'text').map((e) => e.value),
+      ['Here is what I found.']
+    );
+  });
+});
+
 describe('streamResponse', () => {
   test('reports plain text content', async () => {
     const { reporter, events } = makeReporter();

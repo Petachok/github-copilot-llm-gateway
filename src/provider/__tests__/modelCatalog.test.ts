@@ -48,6 +48,9 @@ function fakeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
 
     usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
+    loopGuardRepetition: true,
+    loopGuardToolNudgeAfter: 3,
+    loopGuardToolForceAnswerAfter: 5,
     ...overrides,
   };
 }

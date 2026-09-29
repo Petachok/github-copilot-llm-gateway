@@ -296,6 +296,26 @@
           "maximum": 100,
           "markdownDescription": "The status bar turns **red** when the remaining daily tokens are at or below this percentage of the daily limit. `0` means red only once the limit is reached (it is always red then).",
           "order": 26
+        },
+        "github.copilot.llm-gateway.loopGuardRepetition": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Stop a response when the model gets stuck repeating the same text or thinking over and over, close the request so the server stops generating, and add a short note explaining why. An explicit request to repeat something many times will also be cut off — turn this off if you need that.",
+          "order": 27
+        },
+        "github.copilot.llm-gateway.loopGuardToolNudgeAfter": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "markdownDescription": "When the model makes the same tool call with the same arguments and gets the same result this many times in a row, add a warning to the tool result telling it to use what it has or change approach. `0` turns this off; values below `2` also turn it off.",
+          "order": 28
+        },
+        "github.copilot.llm-gateway.loopGuardToolForceAnswerAfter": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "markdownDescription": "When the same tool call repeats this many times in a row with identical results, ask the model for a text-only answer on the next request (`tool_choice: none`; any tool call the server returns anyway is withheld) and show a note in the chat. `0` turns this off; values below `2` also turn it off.",
+          "order": 29
         }
       }
     }

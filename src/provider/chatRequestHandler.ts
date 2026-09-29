@@ -16,6 +16,12 @@ import {
 import { tryRepairJson } from '../chat/jsonRepair';
 import { fillMissingRequiredProperties } from '../chat/toolSchema';
 import {
+  appendToolLoopNudge,
+  buildToolLoopNote,
+  countRepeatedToolRounds,
+  resolveToolLoopAction,
+} from '../chat/toolLoop';
+import {
   StreamChunk,
   StreamReporter,
   StreamStats,
@@ -173,6 +179,7 @@ export class ChatRequestHandler {
     const openAIMessages = convertAllMessages(messages, config.enableImageInput, log);
     log(`Converted to ${openAIMessages.length} OpenAI messages`);
     this.logMessageStructure(openAIMessages);
+    const loopGuard = this.applyToolLoopGuard(openAIMessages, config, options, progress);
 
     // Fail closed: only track/append a token summary when the installed
     // Copilot build actually supplies both private identity fields (see
@@ -198,6 +205,8 @@ export class ChatRequestHandler {
     // calling is disabled.
     const { tools: filteredTools, schemas: toolSchemas } = this.buildToolsConfig(config, options);
     const toolsSerializedLength = filteredTools ? JSON.stringify(filteredTools).length : 0;
+    // Tools stay in the request: some backends reject tool history without tool definitions.
+    const toolChoice: ToolChoice | undefined = loopGuard.forceAnswer ? 'none' : this.mapToolChoice(options.toolMode);
 
     // Once anything has been streamed to the chat view we can no longer
     // transparently re-issue the request without duplicating output, so track
@@ -226,7 +235,7 @@ export class ChatRequestHandler {
         outputWindowIsSeparate,
       });
 
-      const truncatedMessages = truncateMessagesToFit(openAIMessages, maxInputTokens, log);
+      const truncatedMessages = truncateMessagesToFit(loopGuard.messages, maxInputTokens, log);
       if (truncatedMessages.length < openAIMessages.length) {
         log(
           `WARNING: Truncated conversation from ${openAIMessages.length} to ${truncatedMessages.length} messages to fit context limit`
@@ -283,7 +292,7 @@ export class ChatRequestHandler {
         maxTokens: safeMaxOutputTokens,
         temperature,
         tools: filteredTools,
-        toolChoice: hasTools ? this.mapToolChoice(options.toolMode) : undefined,
+        toolChoice: hasTools ? toolChoice : undefined,
         parallelToolCalls: hasTools ? config.parallelToolCalling : undefined,
         extraOptions: {
           ...discoveredSamplerOptions(discovered),
@@ -319,16 +328,14 @@ export class ChatRequestHandler {
         isCancelled: () => token.isCancellationRequested,
         resolveToolCallArgs: (toolCall) => this.resolveToolCallArgs(toolCall, toolSchemas),
         maxOutputTokens: safeMaxOutputTokens,
+        detectRepetition: config.loopGuardRepetition,
+        dropToolCalls: loopGuard.forceAnswer,
       });
 
       log(
         `Completed chat request, received ${stats.totalContentLength} chars, ${stats.totalTextParts} text parts, ${stats.totalToolCalls} tool calls, finish_reason=${stats.finishReason ?? 'none'}`
       );
-      if (stats.outputTruncated) {
-        log(
-          `WARNING: max_tokens (${safeMaxOutputTokens}) exhausted${stats.hadThinking ? ' during thinking' : ''} with no visible output. Raise defaultMaxOutputTokens or lower the model's thinking effort.`
-        );
-      }
+      this.logStreamWarnings(stats, safeMaxOutputTokens);
 
       if (replyIdentity) {
         this.completeReplyRound(replyIdentity, stats, roundUsage, emittedToolCallIds, token, trackingProgress);
@@ -388,6 +395,54 @@ export class ChatRequestHandler {
       default:
         return undefined;
     }
+  }
+
+  /**
+   * Break agent tool-call loops (same call, same result, round after round):
+   * nudge the model through the latest tool result, then ask for a text-only
+   * answer. The visible note bypasses `trackingProgress` so the
+   * context-overflow retry, which needs nothing streamed yet, still works.
+   */
+  private applyToolLoopGuard(
+    openAIMessages: OpenAIMessage[],
+    config: GatewayConfig,
+    options: vscode.ProvideLanguageModelChatResponseOptions,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>
+  ): { messages: OpenAIMessage[]; forceAnswer: boolean } {
+    // Only agent rounds offer tools; utility requests (titles, summaries) replay history without them.
+    if (!config.enableToolCalling || !options.tools?.length) {
+      return { messages: openAIMessages, forceAnswer: false };
+    }
+    const status = countRepeatedToolRounds(openAIMessages);
+    const action = resolveToolLoopAction(
+      status.count,
+      config.loopGuardToolNudgeAfter,
+      config.loopGuardToolForceAnswerAfter
+    );
+    if (action === 'none') {
+      return { messages: openAIMessages, forceAnswer: false };
+    }
+
+    // A caller that requires a tool call only gets the nudge.
+    const forceAnswer =
+      action === 'forceAnswer' && options.toolMode !== vscode.LanguageModelChatToolMode.Required;
+    const names = status.toolNames.join(', ').replaceAll('`', '');
+    this.deps.log(
+      `Loop guard: ${names} repeated ${status.count}x with identical arguments and results; ${
+        forceAnswer ? 'asking for a text-only answer' : 'nudging the model'
+      }`
+    );
+    if (forceAnswer) {
+      progress.report(
+        new vscode.LanguageModelTextPart(
+          `*(Loop guard: the model called \`${names}\` ${status.count} times in a row with identical results, so tools are disabled for this reply.)*\n\n`
+        )
+      );
+    }
+    return {
+      messages: appendToolLoopNudge(openAIMessages, buildToolLoopNote(status, forceAnswer)),
+      forceAnswer,
+    };
   }
 
   private buildToolsConfig(
@@ -511,6 +566,21 @@ export class ChatRequestHandler {
   }
 
   // ---------- logging / error helpers ----------
+
+  private logStreamWarnings(stats: StreamStats, maxOutputTokens: number): void {
+    const { log } = this.deps;
+    if (stats.outputTruncated) {
+      log(
+        `WARNING: max_tokens (${maxOutputTokens}) exhausted${stats.hadThinking ? ' during thinking' : ''} with no visible output. Raise defaultMaxOutputTokens or lower the model's thinking effort.`
+      );
+    }
+    if (stats.repetitionStopped) {
+      log('WARNING: Loop guard stopped a response that kept repeating itself and closed the request.');
+    }
+    if (stats.droppedToolCalls) {
+      log(`WARNING: Loop guard withheld ${stats.droppedToolCalls} tool call(s) from a text-only round; the server ignored tool_choice 'none'.`);
+    }
+  }
 
   private logMessageStructure(openAIMessages: readonly OpenAIMessage[]): void {
     for (let i = 0; i < openAIMessages.length; i++) {

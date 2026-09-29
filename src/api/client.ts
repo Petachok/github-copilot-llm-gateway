@@ -181,7 +181,7 @@ interface StreamTimers {
   readonly resetInactivity: () => void;
   /** Called once response headers arrive — switches to the inactivity timer. */
   readonly onHeadersReceived: () => void;
-  /** Clears every outstanding timer + cancellation subscription. */
+  /** Clears every outstanding timer + cancellation subscription and aborts the request. */
   readonly dispose: () => void;
 }
 
@@ -426,6 +426,8 @@ export class GatewayClient {
         clearTimeout(headerTimeoutId);
         if (inactivityTimeoutId) { clearTimeout(inactivityTimeoutId); }
         cancelSub.dispose();
+        // A consumer that stops reading early would otherwise leave the server generating.
+        controller.abort();
       },
     };
   }

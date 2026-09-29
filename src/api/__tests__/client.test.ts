@@ -218,6 +218,9 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
 
     usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
+    loopGuardRepetition: true,
+    loopGuardToolNudgeAfter: 3,
+    loopGuardToolForceAnswerAfter: 5,
   };
 
   const token = {
@@ -281,6 +284,28 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
       'data: [DONE]',
     ]);
     assert.deepEqual(reasoning, ['thought']);
+  });
+
+  test('aborts the HTTP request when the consumer stops reading early', async () => {
+    const originalFetch = globalThis.fetch;
+    let signal: AbortSignal | undefined;
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"one"}}]}',
+        'data: {"choices":[{"delta":{"content":"two"}}]}',
+        'data: [DONE]',
+      ]);
+    };
+    try {
+      const client = new GatewayClient(config);
+      for await (const chunk of client.streamChatCompletion({ model: 'm', messages: [] }, token)) {
+        if (chunk.content) { break; }
+      }
+      assert.equal(signal?.aborted, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

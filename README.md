@@ -43,6 +43,7 @@ If native BYOK already works well for you, you don't need this extension. If you
 | **Reasoning / thinking handling** | Routes `<think>`/`<thinking>` blocks (and a separate `reasoning_content` field) into Copilot's thinking UI instead of dumping chain-of-thought into the chat — handling tags split across stream chunks and LM Studio's stray-tag quirk, with a fallback when a model exhausts its budget mid-thought. |
 | **Safe context budgeting**   | Auto-detects the real context window from `/v1/models` (across vLLM, LiteLLM, Ollama, llama.cpp, and LocalAI field names) and shrinks `max_tokens` conservatively so small servers don't return context-length errors.                                            |
 | **Tool-call tuning**         | Sends a low agent temperature and exposes parallel-tool-call / tool-choice toggles to stabilize tool-call formatting from finicky fine-tuned models.                                                                                                      |
+| **Loop guard**               | Stops a response when a model gets stuck repeating the same text or thinking, and closes the request so the server stops generating. In agent mode, warns a model that keeps making the same tool call with the same result, then asks it for a text-only answer. |
 | **Actionable diagnostics**   | Turns raw connection / auth / timeout and tool-parser failures into concrete fixes (remove a stray `/v1`, drop a `Bearer ` prefix, raise the timeout, disable tool calling).                                                                              |
 
 It also keeps the familiar benefits of self-hosting: inference stays on your network, there are no per-token fees, and your self-hosted models don't draw down Copilot premium quota.
@@ -286,6 +287,21 @@ These settings control how the extension handles agentic features like code edit
 | **Agent Temperature**     | `0.0`   | Temperature for tool calling mode. Lower values produce more consistent tool call formatting.          |
 
 > **Tip**: If your model outputs tool descriptions as text instead of actually calling tools, try setting **Agent Temperature** to `0.0` and disabling **Parallel Tool Calling**.
+
+### Loop Guard
+
+Small and quantized models sometimes get stuck. The loop guard catches two cases:
+
+- **Repeating output**: the model writes the same sentence or paragraph over and over, in its answer or its thinking. The gateway stops the response, closes the request so the server stops generating, and adds a short note. Ask the model to continue or rephrase.
+- **Tool-call loops**: in agent mode, the model keeps making the same tool call with the same arguments and gets the same result each time. The gateway first adds a warning to the tool result telling the model to change approach. If the loop continues, it asks for a text-only answer on the next request (`tool_choice: none`; a tool call the server returns anyway is withheld) and shows a note in the chat. Only identical results count: polling a build that keeps printing output is not affected, but polling one that prints nothing new is.
+
+| Setting                                | Default | Description                                                                                                  |
+| -------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| **Loop Guard Repetition**              | `true`  | Stop a response that keeps repeating itself.                                                                 |
+| **Loop Guard Tool Nudge After**        | `3`     | Warn the model after this many identical tool calls in a row (same arguments, same result). `0` turns it off. |
+| **Loop Guard Tool Force Answer After** | `5`     | Ask for a text-only answer after this many identical tool calls in a row. `0` turns it off.                  |
+
+> **Note**: A request to repeat something many times on purpose is also cut off. Turn off **Loop Guard Repetition** if you need that.
 
 ### Diagnostic Settings
 
