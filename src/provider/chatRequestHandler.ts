@@ -29,6 +29,7 @@ import {
   extractReplyIdentity,
   extractToolResultIds,
   formatReplyTokenSummaryLine,
+  sessionAffinityHeaders,
 } from '../chat/replyTokenUsage';
 import { friendlyModelName } from '../models/modelDisplay';
 import { TokenUsage } from '../status/sessionStats';
@@ -176,11 +177,12 @@ export class ChatRequestHandler {
 
     // Fail closed: only track/append a token summary when the installed
     // Copilot build actually supplies both private identity fields (see
-    // replyTokenUsage.ts). Gating extraction on the setting means a disabled
-    // feature never touches the tracker at all.
-    const replyIdentity = config.showReplyTokenUsage
-      ? extractReplyIdentity(options.modelOptions)
-      : undefined;
+    // replyTokenUsage.ts). Session affinity needs the same identity, so it is
+    // extracted unconditionally, but the tracker only ever sees it when
+    // showReplyTokenUsage is on — a disabled feature never touches the
+    // tracker at all.
+    const conversationIdentity = extractReplyIdentity(options.modelOptions);
+    const replyIdentity = config.showReplyTokenUsage ? conversationIdentity : undefined;
     if (config.showReplyTokenUsage && !replyIdentity) {
       log(
         'Reply token summary: no valid _conversationId/_telemetryTurn on this request; skipping (this is expected on Copilot builds that don\'t supply them).'
@@ -312,7 +314,8 @@ export class ChatRequestHandler {
         (round) => { roundUsage = round; },
         (id) => { emittedToolCallIds.push(id); }
       );
-      const chunks = this.deps.client.streamChatCompletion(requestOptions, token);
+      const affinityHeaders = this.buildAffinityHeaders(config.sessionAffinityHeader, conversationIdentity);
+      const chunks = this.deps.client.streamChatCompletion(requestOptions, token, affinityHeaders);
       const stats = await streamResponse({
         chunks: chunks as AsyncIterable<StreamChunk>,
         reporter,
@@ -548,6 +551,21 @@ export class ChatRequestHandler {
         ? `Request (truncated): ${debugRequest.substring(0, DEBUG_REQUEST_MAX_LOG_LENGTH)}...`
         : `Request: ${debugRequest}`
     );
+  }
+
+  /**
+   * Session-affinity headers for one request, logging when a configured
+   * header has to be dropped so a bad setting isn't silently ignored.
+   */
+  private buildAffinityHeaders(
+    headerName: string,
+    identity: ReplyIdentity | undefined
+  ): Record<string, string> {
+    const headers = sessionAffinityHeaders(headerName, identity);
+    if (headerName.trim() && identity && Object.keys(headers).length === 0) {
+      this.deps.log(`Session affinity: header name "${headerName}" is not a valid or allowed header (or the conversation id is unusable); sending without it.`);
+    }
+    return headers;
   }
 
   /**

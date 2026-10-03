@@ -5,6 +5,7 @@ import {
   extractReplyIdentity,
   extractToolResultIds,
   formatReplyTokenSummaryLine,
+  sessionAffinityHeaders,
   stripReplyTokenSummary,
   ReplyIdentity,
 } from '../replyTokenUsage';
@@ -55,6 +56,45 @@ describe('extractReplyIdentity', () => {
       extractReplyIdentity({ _conversationId: 'abc', _telemetryTurn: Number.MAX_SAFE_INTEGER + 1 }),
       undefined
     );
+  });
+});
+
+describe('sessionAffinityHeaders', () => {
+  test('maps the configured header name to the conversation id', () => {
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', ID), {
+      'x-litellm-session-id': 'conv-1',
+    });
+  });
+
+  test('trims the configured header name', () => {
+    const headers = sessionAffinityHeaders('  x-litellm-session-id  ', ID);
+    assert.deepEqual(headers, { 'x-litellm-session-id': 'conv-1' });
+  });
+
+  test('returns nothing when the feature is off (empty header name)', () => {
+    assert.deepEqual(sessionAffinityHeaders('', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('   ', ID), {});
+  });
+
+  test('returns nothing when the request has no conversation identity (fail closed)', () => {
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', undefined), {});
+  });
+
+  test('returns nothing for a header name fetch would reject', () => {
+    assert.deepEqual(sessionAffinityHeaders('x session id', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('x-session:id', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('x-sessi\u00f6n', ID), {});
+  });
+
+  test('never replaces headers the client already sets', () => {
+    assert.deepEqual(sessionAffinityHeaders('Authorization', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('content-type', ID), {});
+  });
+
+  test('returns nothing when the conversation id is not a safe header value', () => {
+    const odd = (conversationId: string): ReplyIdentity => ({ conversationId, turnIndex: 0 });
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', odd('conv\r\nx-evil: 1')), {});
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', odd('conv \u2603')), {});
   });
 });
 
