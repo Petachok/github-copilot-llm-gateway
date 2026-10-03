@@ -68,7 +68,7 @@ The extension connects to **one** server. To reach several providers at once —
 
 ### Prerequisites
 
-- **VS Code** 1.125.0 or later
+- **VS Code** 1.138.0 or later
 - **GitHub Copilot** extension installed and signed in
 - **Inference server** running with an OpenAI-compatible API
 
@@ -100,14 +100,15 @@ curl http://localhost:42069/v1/models
 
 ### Step 3: Configure the Extension
 
-1. Open VS Code **Settings** (`Ctrl+,` / `Cmd+,`)
-2. Search for **"Copilot LLM Gateway"**
-3. Set **Server URL** to your inference server address (e.g., `http://localhost:42069` to match the server started above; the setting defaults to `http://localhost:8000`)
-4. Configure other settings as needed (token limits, tool calling, etc.)
+1. Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run **GitHub Copilot LLM Gateway: Configure Server**. The same flow opens from **Add Models…** in Copilot Chat's model picker.
+2. Enter the **Server URL** of your inference server, e.g. `http://localhost:42069` to match the server started above (the default is `http://localhost:8000`).
+3. Enter the **API Key** if your server requires one, or leave it empty for unauthenticated local servers. The key is stored in VS Code's secret storage, not in `settings.json`.
+4. If a folder is open, choose whether the Server URL applies to this **Workspace** only or to all windows (**User**).
+5. Finish, or continue to **Edit custom headers…** or **Edit advanced settings…**. Everything else (token limits, tool calling, etc.) lives in VS Code **Settings** (`Ctrl+,` / `Cmd+,`) under **"Copilot LLM Gateway"**.
 
-![Extension settings panel showing all configuration options](assets/screenshot-settings.png)
+> **Where is the API Key setting?** API keys are no longer stored in settings. The old `github.copilot.llm-gateway.apiKey` setting is deprecated and hidden from the Settings UI; any value left in it is moved to secret storage and cleared when the extension starts. Set or change the key with **Configure Server**, or in the **API Key** field VS Code shows for the **LLM Gateway** provider under **Chat: Manage Language Models**. If both are set, the key entered in Manage Language Models is used.
 
-> **Note**: If the server is unreachable, you'll see an error notification with a quick link to settings:
+> **Note**: If the server is unreachable, you'll see an error notification with a link to the extension's settings:
 >
 > ![Connection error notification](assets/screenshot-notification.png)
 
@@ -135,7 +136,7 @@ Your self-hosted models now appear alongside the default Copilot models. Select 
 The model integrates seamlessly with Copilot's features including:
 - **Agent mode** for autonomous coding tasks
 - **Tool calling** for file operations, terminal commands, and more
-- **Context awareness** with `@workspace` and file references
+- **Context awareness** with `#codebase` and file references
 
 ### Status Bar & Connection Info
 
@@ -202,8 +203,9 @@ Configure the extension through VS Code Settings (`Ctrl+,` / `Cmd+,`) → search
 | Setting             | Default                 | Description                                         |
 | ------------------- | ----------------------- | --------------------------------------------------- |
 | **Server URL**      | `http://localhost:8000` | Base URL of your OpenAI-compatible inference server |
-| **API Key**         | _(empty)_               | Authentication key if your server requires one      |
 | **Request Timeout** | `60000`                 | Request timeout in milliseconds                     |
+
+The **API key** and any **custom HTTP headers** are not settings: they are kept in VS Code's secret storage and managed with the **Configure Server** and **Edit Custom Headers** commands (see [Step 3](#step-3-configure-the-extension)). The deprecated `apiKey` and `customHeaders` settings are migrated to secret storage automatically.
 
 **Server URL** can be saved to either **User** or **Workspace** settings from the *Configure Server* command, so different VS Code windows can point at different servers. The API key is always stored globally (VS Code's secret storage is not workspace-aware).
 
@@ -212,7 +214,7 @@ Configure the extension through VS Code Settings (`Ctrl+,` / `Cmd+,`) → search
 | Setting                       | Default  | Description                                                                                                  |
 | ----------------------------- | -------- | ------------------------------------------------------------------------------------------------------------ |
 | **Default Max Tokens**        | `262144` | Fallback context window size (total tokens) used only when the inference server does not report one itself. Never overrides a server-reported value — use **Model Context Windows** for that. |
-| **Default Max Output Tokens** | `16384`  | Fallback maximum output tokens used when the server does not report `max_output_tokens`. Thinking models spend part of this on reasoning before answering; it is clamped to at most half the context window. |
+| **Default Max Output Tokens** | `16384`  | Fallback maximum output tokens used when the server does not report `max_output_tokens`. Thinking models spend part of this on reasoning before answering; on servers with a single shared window it is clamped to at most half of that window. |
 | **Model Context Windows**     | `{}`     | Per-model context window override (total tokens), keyed by model id or `*` wildcard. Wins over server-reported values. |
 | **Enable Image Input**        | `true`   | Advertise image-input capability for multimodal models and forward image parts as base64 `image_url`s.       |
 
@@ -267,7 +269,7 @@ Different model families often need different sampling parameters for the same t
 }
 ```
 
-The merge order, lowest to highest priority, is: `extraModelOptions` → matching `perModelOptions` → per-request options supplied by Copilot itself.
+The merge order, lowest to highest priority, is: sampler defaults discovered from the backend (e.g. an Ollama Modelfile's `temperature` / `top_p`) → `extraModelOptions` → matching `perModelOptions` → per-request options supplied by Copilot itself.
 
 ### Thinking Effort
 
@@ -307,7 +309,7 @@ These settings control how the extension handles agentic features like code edit
 | ------------------------- | ------- | ------------------------------------------------------------------------------------------------------ |
 | **Enable Tool Calling**   | `true`  | Allow models to use Copilot's tools (file read/write, terminal, etc.)                                  |
 | **Parallel Tool Calling** | `true`  | Allow multiple tools to be called simultaneously. Disable if your model struggles with parallel calls. |
-| **Agent Temperature**     | `0.0`   | Temperature for tool calling mode. Lower values produce more consistent tool call formatting.          |
+| **Agent Temperature**     | `0.0`   | Fallback temperature for requests that include tools, used only when no temperature comes from Copilot, `perModelOptions`, `extraModelOptions` or the backend's own model config. Lower values produce more consistent tool-call formatting. |
 
 > **Tip**: If your model outputs tool descriptions as text instead of actually calling tools, try setting **Agent Temperature** to `0.0` and disabling **Parallel Tool Calling**.
 
@@ -328,6 +330,8 @@ VS Code does **not** let bring-your-own-key models power its own inline ("ghost 
 | **Inline Completion Max Tokens** | `256`   | Maximum tokens generated per completion. Lower is faster.                                                          |
 | **Inline Completion Debounce**   | `300`   | Milliseconds to wait after the last keystroke before requesting a completion.                                     |
 | **Inline Completion Timeout**    | `3000`  | Per-request timeout (ms). Kept short so a slow server doesn't stall suggestions.                                   |
+| **Inline Completion Max Prefix Chars** | `4000` | Maximum characters of context before the cursor sent with each request.                                  |
+| **Inline Completion Max Suffix Chars** | `1000` | Maximum characters of context after the cursor sent with each request.                                   |
 
 **Requirements & notes:**
 
@@ -501,9 +505,9 @@ If you only need *different* servers in *different* projects rather than several
 
 1. Verify server is running: `curl http://your-server:port/v1/models`
 2. Check **Server URL** in settings — paste the **base URL only**, e.g. `http://your-server:port`. Do **not** include a trailing `/v1` or a trailing slash; the extension appends `/v1/models` itself.
-3. Check **API Key** — paste the key only. Do **not** prefix it with `Bearer `; the extension adds that automatically.
+3. Check the **API Key** by re-running **"GitHub Copilot LLM Gateway: Configure Server"** — paste the key only. Do **not** prefix it with `Bearer `; the extension adds that automatically. If you also entered a key under **Chat: Manage Language Models → LLM Gateway**, that one takes precedence.
 4. Run command **"GitHub Copilot LLM Gateway: Test Server Connection"** from the Command Palette.
-5. If the connection worked earlier but models vanished, run **"GitHub Copilot LLM Gateway: Refresh Models"** from the Command Palette (or click the status-bar entry).
+5. If the connection worked earlier but models vanished, run **"GitHub Copilot LLM Gateway: Refresh Models"** from the Command Palette (or from the status-bar menu).
 6. Inspect the **"GitHub Copilot LLM Gateway"** output channel for the exact URL being probed and the server's response.
 
 ### Model not appearing in the Agents window
@@ -551,6 +555,7 @@ Access from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 | **GitHub Copilot LLM Gateway: Show Output Log**        | Open the extension's output channel                                 |
 | **GitHub Copilot LLM Gateway: Set Thinking Effort**    | Pick a model and a reasoning-effort level to send with every request |
 | **GitHub Copilot LLM Gateway: Refresh Daily Usage**    | Re-fetch the gateway's daily token quota shown in the status bar    |
+| **GitHub Copilot LLM Gateway: Show Status Menu**       | Open the status menu (same as clicking the status-bar entry)        |
 
 ## Reply Token Summary
 
