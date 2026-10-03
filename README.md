@@ -143,9 +143,15 @@ The model integrates seamlessly with Copilot's features including:
 
 ### Status Bar & Connection Info
 
-A status-bar entry (bottom-right) shows the gateway's connection state at a glance and turns into a live indicator while a request streams. Hover it for a detailed info popup — connection status, the detected models with their context windows and capabilities, running session token totals, the last request, and the active feature toggles. Click it for the **status menu**: the same sections as a Quick Pick, with checkbox-style toggles for inline suggestions, tool calling, parallel tool calls and image input that flip the setting in place, a per-model shortcut to **Thinking Effort**, and the refresh / test / configure / headers / settings / log actions.
+A status-bar entry (bottom-right) shows the gateway's connection state at a glance and turns into a live indicator while a request streams. Hover it for a detailed info popup — connection status, the detected models with their context windows and capabilities, running session token totals (including cached prompt tokens when the server reports them), the last request, and the active feature toggles. Click it for the **status menu**: the same sections as a Quick Pick, with checkbox-style toggles for inline suggestions, tool calling, parallel tool calls and image input that flip the setting in place, a per-model shortcut to **Thinking Effort**, and the refresh / test / configure / headers / settings / log actions.
 
 ![LLM Gateway status info dialog](assets/screenshot-status-dialog.png)
+
+#### Token usage in chat
+
+The token counts your server reports with each response are passed to VS Code, so gateway models get the same usage displays as Copilot's own models: the context-window control in the Chat view, and the per-turn usage breakdown (input, cached input and output tokens) shown when you hover over a response's footer. Cache-write and reasoning token counts are passed through too when the server reports them.
+
+Cached input appears when the server reports prompt-cache hits in the standard `prompt_tokens_details.cached_tokens` field. llama.cpp, Ollama and LiteLLM do this by default; **vLLM** needs `--enable-prompt-tokens-details`.
 
 #### Daily token quota
 
@@ -287,9 +293,21 @@ The merge order, lowest to highest priority, is: sampler defaults discovered fro
 
 ### Thinking Effort
 
-Copilot Chat's native **Thinking Effort** submenu only appears for the reasoning models Copilot itself knows about; VS Code's provider API gives third-party models no way to join it. The **GitHub Copilot LLM Gateway: Set Thinking Effort** command (also linked from the status-bar popup) fills the gap: pick a model, then **Off / Low / Medium / High** or a custom value, and the choice is written to `perModelOptions` as `reasoning_effort` for that model id. **Off** removes the key so the server's own default applies.
+Gateway models can show VS Code's native **Thinking Effort** control in the chat model picker, the same one Copilot's built-in reasoning models use. Choose **Server Default**, **Low**, **Medium** or **High** per model; the choice is sent as `reasoning_effort` on every request to that model, and **Server Default** sends nothing so the server's own default applies.
 
-`reasoning_effort` is understood by vLLM, LiteLLM, and most OpenAI-compatible servers. For backends that name the parameter differently, set `github.copilot.llm-gateway.thinkingEffortParameter` (e.g. `reasoning_budget` for llama.cpp) and use **Custom…** to enter the value. Anything more exotic — llama.cpp's `chat_template_kwargs: { "enable_thinking": false }` for Qwen3, or Ollama's `think: false` — can still be set directly in `perModelOptions`.
+Which models show the control is set by `github.copilot.llm-gateway.thinkingEffortPicker`:
+
+| Value | Models with the Thinking Effort control |
+| --- | --- |
+| `auto` (default) | Models the server reports as reasoning models (Ollama's `thinking` capability, LiteLLM's `supports_reasoning`), plus any model that already has a thinking effort set in `perModelOptions` |
+| `all` | Every gateway model. Use this with servers that don't report reasoning support, such as vLLM and llama.cpp. |
+| `off` | None |
+
+The **GitHub Copilot LLM Gateway: Set Thinking Effort** command (also in the status-bar menu) works with every VS Code version and every model: pick a model, then **Off / Low / Medium / High** or a custom value, and the choice is written to `perModelOptions` for that model id. The picker starts from that value, so the two stay in step; once you choose a level in the picker, the picker's choice takes precedence for that model.
+
+`reasoning_effort` is understood by vLLM, LiteLLM, and most OpenAI-compatible servers. For backends that name the parameter differently, set `github.copilot.llm-gateway.thinkingEffortParameter` (e.g. `reasoning_budget` for llama.cpp); both the picker and the command use it, and the command's **Custom…** option accepts any value. Anything more exotic — llama.cpp's `chat_template_kwargs: { "enable_thinking": false }` for Qwen3, or Ollama's `think: false` — can still be set directly in `perModelOptions`.
+
+> The picker control relies on a VS Code model-picker API that is still marked as proposed. VS Code builds that don't support it simply don't show the control; the command keeps working either way.
 
 ### Session Affinity (Sticky Sessions)
 
@@ -574,7 +592,7 @@ Access from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 | **GitHub Copilot LLM Gateway: Refresh Models**         | Re-probe the inference server and refresh the picker                |
 | **GitHub Copilot LLM Gateway: Edit Custom Headers**    | Add, edit, or remove custom HTTP headers (stored in secret storage) |
 | **GitHub Copilot LLM Gateway: Show Output Log**        | Open the extension's output channel                                 |
-| **GitHub Copilot LLM Gateway: Set Thinking Effort**    | Pick a model and a reasoning-effort level to send with every request |
+| **GitHub Copilot LLM Gateway: Set Thinking Effort**    | Pick a model and a reasoning-effort level to send with every request (also available in the model picker) |
 | **GitHub Copilot LLM Gateway: Refresh Daily Usage**    | Re-fetch the gateway's daily token quota shown in the status bar    |
 | **GitHub Copilot LLM Gateway: Show Status Menu**       | Open the status menu (same as clicking the status-bar entry)        |
 
@@ -583,15 +601,17 @@ Access from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 By default replies look exactly like native Copilot output — per-request token counts live in the [status bar menu](#status-bar--connection-info) and VS Code's context-window widget. If you'd rather see the numbers in the chat itself, an opt-in setting appends a plain-text summary line to the end of each reply:
 
 ```
-Tokens: input 12,345 | output 1,234 | total 13,579
+Tokens: input 12,345 (10,240 cached) | output 1,234 | total 13,579
 ```
+
+The `cached` figure appears when the server reports prompt tokens served from its cache, and is part of the input count.
 
 - **Scope is one completed reply**, including all of its internal tool-call rounds — not the whole chat conversation, and not the extension's lifetime session totals shown in the [status dialog](#status-bar--connection-info). Nested subagent calls (a tool that spawns its own separate chat) are **not** rolled into the parent reply's total.
 - Counts are **server-reported usage**, summed once per actual model call — not a token estimate. Because each round of a multi-step tool-calling reply resends the growing conversation, the input count is the sum of what was *actually sent* on each call, not a single context-window snapshot.
 - If the server didn't report usage for one round, the line reads `Tokens (partial): …` using only the rounds that did. If no round ever reported usage, it reads `Tokens: input unavailable | output unavailable | total unavailable`.
 - The line is ordinary assistant text, so it is included if you copy or export the reply. The gateway strips it from the assistant history before sending later turns to the server, so it never costs prompt tokens or gets echoed by the model — and it is not counted as part of this reply's own output tokens.
 - Setting: `github.copilot.llm-gateway.showReplyTokenUsage` (default: off). Turn it on to add the line.
-- **Compatibility note**: linking a reply's tool-call rounds together requires per-request identity fields that Copilot Chat passes internally but does not publish as a stable API. If your installed Copilot Chat build doesn't supply them, this feature silently does nothing — no line is added, and nothing else about the reply changes. This does not affect the [context-window usage widget](#what-it-does-that-a-plain-connection-doesnt), which uses a separate, stable mechanism.
+- **Compatibility note**: linking a reply's tool-call rounds together requires per-request identity fields that Copilot Chat passes internally but does not publish as a stable API. If your installed Copilot Chat build doesn't supply them, this feature silently does nothing — no line is added, and nothing else about the reply changes. This does not affect the [token usage shown in chat](#token-usage-in-chat), which uses a separate, stable mechanism.
 
 ## Privacy & Network Requests
 

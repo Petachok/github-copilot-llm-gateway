@@ -143,17 +143,23 @@ function connectionItems(snapshot: StatusSnapshot): StatusMenuItem[] {
   }
 }
 
+/** `3 requests · 13k tokens (12k in, 8k cached / 800 out)`, or a placeholder before the first request. */
+function sessionUsageDescription(stats: StatusSnapshot['sessionStats']): string {
+  if (stats.requestCount === 0) {
+    return 'No requests yet';
+  }
+  const requests = `${stats.requestCount} request${stats.requestCount === 1 ? '' : 's'}`;
+  const cached = stats.cachedTokens > 0 ? `, ${formatTokenCount(stats.cachedTokens)} cached` : '';
+  return `${requests} · ${formatTokenCount(stats.totalTokens)} tokens (${formatTokenCount(stats.promptTokens)} in${cached} / ${formatTokenCount(stats.completionTokens)} out)`;
+}
+
 function sessionItems(snapshot: StatusSnapshot): StatusMenuItem[] {
   const stats = snapshot.sessionStats;
   const items: StatusMenuItem[] = [];
 
-  const requests = `${stats.requestCount} request${stats.requestCount === 1 ? '' : 's'}`;
   items.push({
     label: '$(graph) Session usage',
-    description:
-      stats.requestCount === 0
-        ? 'No requests yet'
-        : `${requests} · ${formatTokenCount(stats.totalTokens)} tokens (${formatTokenCount(stats.promptTokens)} in / ${formatTokenCount(stats.completionTokens)} out)`,
+    description: sessionUsageDescription(stats),
     action: { kind: 'none' },
   });
 
@@ -164,6 +170,9 @@ function sessionItems(snapshot: StatusSnapshot): StatusMenuItem[] {
     let detail: string | undefined;
     if (last.usage) {
       parts.push(`${formatTokenCount(last.usage.total)} tokens`);
+      if (last.usage.cached !== undefined && last.usage.cached > 0) {
+        parts.push(`${formatTokenCount(last.usage.cached)} cached`);
+      }
       const model = snapshot.models.find((m) => m.id === last.modelId);
       if (model?.totalContext) {
         const ratio = last.usage.total / model.totalContext;

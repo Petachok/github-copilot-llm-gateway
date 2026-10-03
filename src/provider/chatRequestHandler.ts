@@ -4,6 +4,7 @@ import { OpenAIChatCompletionRequest, OpenAIMessage } from '../api/types';
 import { buildChatRequest, OpenAIToolDefinition, ToolChoice } from '../api/requestBuilder';
 import { GatewayConfig } from '../config/gatewayConfig';
 import { resolvePerModelOptions } from '../config/perModelOptions';
+import { applyModelConfigurationEffort } from '../config/thinkingEffort';
 import { REQUEST_SAMPLER_KEYS } from '../discovery/types';
 import {
   TOKEN_CONSTANTS,
@@ -288,9 +289,18 @@ export class ChatRequestHandler {
         toolChoice: hasTools ? this.mapToolChoice(options.toolMode) : undefined,
         parallelToolCalls: hasTools ? config.parallelToolCalling : undefined,
         extraOptions: {
-          ...discoveredSamplerOptions(discovered),
-          ...config.extraModelOptions,
-          ...perModel,
+          // A Thinking Effort chosen in the model picker overrides the
+          // settings-based value (including removing it for "Server
+          // Default"); only Copilot's own per-request options rank higher.
+          ...applyModelConfigurationEffort(
+            {
+              ...discoveredSamplerOptions(discovered),
+              ...config.extraModelOptions,
+              ...perModel,
+            },
+            options.modelConfiguration,
+            config.thinkingEffortParameter
+          ),
           ...options.modelOptions,
         },
       });
@@ -494,16 +504,21 @@ export class ChatRequestHandler {
         // the chat view's context-window widget render real numbers instead
         // of `0%` for gateway models (issue #24).
         this.deps.log(
-          `Usage: prompt=${usage.prompt_tokens}, completion=${usage.completion_tokens}, total=${usage.total_tokens}`
+          `Usage: prompt=${usage.prompt_tokens}, completion=${usage.completion_tokens}, total=${usage.total_tokens}, cached=${usage.prompt_tokens_details?.cached_tokens ?? 0}${
+            usage.completion_tokens_details?.reasoning_tokens === undefined ? '' : `, reasoning=${usage.completion_tokens_details.reasoning_tokens}`
+          }`
         );
+        const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
         onUsage?.({
           prompt: usage.prompt_tokens,
           completion: usage.completion_tokens,
           total: usage.total_tokens,
+          cached,
         });
         onRoundUsage?.({
           promptTokens: usage.prompt_tokens,
           completionTokens: usage.completion_tokens,
+          cachedTokens: cached,
           promptKnown: availability?.promptKnown ?? true,
           completionKnown: availability?.completionKnown ?? true,
         });
