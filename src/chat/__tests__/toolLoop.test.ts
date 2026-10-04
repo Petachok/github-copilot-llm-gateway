@@ -5,6 +5,7 @@ import {
   appendToolLoopNudge,
   buildToolLoopNote,
   countRepeatedToolRounds,
+  guardToolLoop,
   resolveToolLoopAction,
 } from '../toolLoop';
 
@@ -167,5 +168,34 @@ describe('buildToolLoopNote', () => {
 
   test('tells the model tools are disabled when forcing an answer', () => {
     assert.match(buildToolLoopNote({ count: 5, toolNames: ['read_file'] }, true), /disabled/);
+  });
+});
+
+describe('guardToolLoop', () => {
+  const looping = [
+    ...PROMPT,
+    ...round('c1', 'read_file', READ_ARGS, 'file body'),
+    ...round('c2', 'read_file', READ_ARGS, 'file body'),
+    ...round('c3', 'read_file', READ_ARGS, 'file body'),
+  ];
+  const options = { toolsOffered: true, nudgeAfter: 2, forceAnswerAfter: 3, canForceAnswer: true };
+  const lastContent = (messages: OpenAIMessage[]): string => String(messages[messages.length - 1].content);
+
+  test('forces an answer and tells the model through the latest tool result', () => {
+    const guard = guardToolLoop(looping, options);
+    assert.equal(guard.action, 'forceAnswer');
+    assert.match(lastContent(guard.messages), /Tools are disabled/);
+  });
+
+  test('leaves requests that offer no tools alone', () => {
+    const guard = guardToolLoop(looping, { ...options, toolsOffered: false });
+    assert.equal(guard.action, 'none');
+    assert.equal(guard.messages, looping);
+  });
+
+  test('only nudges a caller that requires a tool call', () => {
+    const guard = guardToolLoop(looping, { ...options, canForceAnswer: false });
+    assert.equal(guard.action, 'nudge');
+    assert.match(lastContent(guard.messages), /will not produce new information/);
   });
 });

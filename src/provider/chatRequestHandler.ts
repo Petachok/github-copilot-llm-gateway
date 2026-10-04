@@ -16,12 +16,7 @@ import {
 } from '../chat/tokenBudget';
 import { tryRepairJson } from '../chat/jsonRepair';
 import { fillMissingRequiredProperties } from '../chat/toolSchema';
-import {
-  appendToolLoopNudge,
-  buildToolLoopNote,
-  countRepeatedToolRounds,
-  resolveToolLoopAction,
-} from '../chat/toolLoop';
+import { guardToolLoop } from '../chat/toolLoop';
 import {
   StreamChunk,
   StreamReporter,
@@ -422,23 +417,17 @@ export class ChatRequestHandler {
     options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>
   ): { messages: OpenAIMessage[]; forceAnswer: boolean } {
-    // Only agent rounds offer tools; utility requests (titles, summaries) replay history without them.
-    if (!config.enableToolCalling || !options.tools?.length) {
-      return { messages: openAIMessages, forceAnswer: false };
-    }
-    const status = countRepeatedToolRounds(openAIMessages);
-    const action = resolveToolLoopAction(
-      status.count,
-      config.loopGuardToolNudgeAfter,
-      config.loopGuardToolForceAnswerAfter
-    );
+    const { action, status, messages } = guardToolLoop(openAIMessages, {
+      toolsOffered: config.enableToolCalling && !!options.tools?.length,
+      nudgeAfter: config.loopGuardToolNudgeAfter,
+      forceAnswerAfter: config.loopGuardToolForceAnswerAfter,
+      canForceAnswer: options.toolMode !== vscode.LanguageModelChatToolMode.Required,
+    });
+    const forceAnswer = action === 'forceAnswer';
     if (action === 'none') {
-      return { messages: openAIMessages, forceAnswer: false };
+      return { messages, forceAnswer };
     }
 
-    // A caller that requires a tool call only gets the nudge.
-    const forceAnswer =
-      action === 'forceAnswer' && options.toolMode !== vscode.LanguageModelChatToolMode.Required;
     const names = status.toolNames.join(', ').replaceAll('`', '');
     this.deps.log(
       `Loop guard: ${names} repeated ${status.count}x with identical arguments and results; ${
@@ -452,10 +441,7 @@ export class ChatRequestHandler {
         )
       );
     }
-    return {
-      messages: appendToolLoopNudge(openAIMessages, buildToolLoopNote(status, forceAnswer)),
-      forceAnswer,
-    };
+    return { messages, forceAnswer };
   }
 
   private buildToolsConfig(

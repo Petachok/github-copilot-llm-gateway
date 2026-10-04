@@ -114,3 +114,35 @@ export function appendToolLoopNudge(messages: readonly OpenAIMessage[], note: st
   }
   return copy;
 }
+
+export interface ToolLoopGuardOptions {
+  /** False for utility requests (titles, summaries) that replay agent history without offering tools. */
+  readonly toolsOffered: boolean;
+  readonly nudgeAfter: number;
+  readonly forceAnswerAfter: number;
+  /** False when the caller requires a tool call, which caps the guard at a nudge. */
+  readonly canForceAnswer: boolean;
+}
+
+export interface ToolLoopGuard {
+  /** 'forceAnswer' means the request must send `tool_choice: 'none'` and withhold any tool call. */
+  readonly action: ToolLoopAction;
+  readonly status: ToolLoopStatus;
+  /** The request history, with the loop note appended once the guard fires. */
+  readonly messages: OpenAIMessage[];
+}
+
+/** Pick the guard action for one request and append the matching note to its history. */
+export function guardToolLoop(messages: OpenAIMessage[], options: ToolLoopGuardOptions): ToolLoopGuard {
+  if (!options.toolsOffered) {
+    return { action: 'none', status: { count: 0, toolNames: [] }, messages };
+  }
+  const status = countRepeatedToolRounds(messages);
+  const resolved = resolveToolLoopAction(status.count, options.nudgeAfter, options.forceAnswerAfter);
+  const action = resolved === 'forceAnswer' && !options.canForceAnswer ? 'nudge' : resolved;
+  if (action === 'none') {
+    return { action, status, messages };
+  }
+  const note = buildToolLoopNote(status, action === 'forceAnswer');
+  return { action, status, messages: appendToolLoopNudge(messages, note) };
+}
