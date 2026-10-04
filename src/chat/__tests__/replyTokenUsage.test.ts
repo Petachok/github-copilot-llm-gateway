@@ -5,6 +5,7 @@ import {
   extractReplyIdentity,
   extractToolResultIds,
   formatReplyTokenSummaryLine,
+  sessionAffinityHeaders,
   stripReplyTokenSummary,
   ReplyIdentity,
 } from '../replyTokenUsage';
@@ -55,6 +56,45 @@ describe('extractReplyIdentity', () => {
       extractReplyIdentity({ _conversationId: 'abc', _telemetryTurn: Number.MAX_SAFE_INTEGER + 1 }),
       undefined
     );
+  });
+});
+
+describe('sessionAffinityHeaders', () => {
+  test('maps the configured header name to the conversation id', () => {
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', ID), {
+      'x-litellm-session-id': 'conv-1',
+    });
+  });
+
+  test('trims the configured header name', () => {
+    const headers = sessionAffinityHeaders('  x-litellm-session-id  ', ID);
+    assert.deepEqual(headers, { 'x-litellm-session-id': 'conv-1' });
+  });
+
+  test('returns nothing when the feature is off (empty header name)', () => {
+    assert.deepEqual(sessionAffinityHeaders('', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('   ', ID), {});
+  });
+
+  test('returns nothing when the request has no conversation identity (fail closed)', () => {
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', undefined), {});
+  });
+
+  test('returns nothing for a header name fetch would reject', () => {
+    assert.deepEqual(sessionAffinityHeaders('x session id', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('x-session:id', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('x-sessi\u00f6n', ID), {});
+  });
+
+  test('never replaces headers the client already sets', () => {
+    assert.deepEqual(sessionAffinityHeaders('Authorization', ID), {});
+    assert.deepEqual(sessionAffinityHeaders('content-type', ID), {});
+  });
+
+  test('returns nothing when the conversation id is not a safe header value', () => {
+    const odd = (conversationId: string): ReplyIdentity => ({ conversationId, turnIndex: 0 });
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', odd('conv\r\nx-evil: 1')), {});
+    assert.deepEqual(sessionAffinityHeaders('x-litellm-session-id', odd('conv \u2603')), {});
   });
 });
 
@@ -294,5 +334,41 @@ describe('stripReplyTokenSummary', () => {
     });
     const text = `${line}\n\nMore text after it.`;
     assert.equal(stripReplyTokenSummary(text), text);
+  });
+});
+
+describe('cached prompt tokens in the reply summary', () => {
+  test('sums cached tokens across rounds and shows them with the input count', () => {
+    const tracker = new ReplyTokenUsageTracker();
+    tracker.beginRound(ID, []);
+    tracker.recordRound(ID, { usage: { ...known(1000, 50), cachedTokens: 0 }, outgoingToolCallIds: ['t1'] });
+    tracker.beginRound(ID, ['t1']);
+    tracker.recordRound(ID, { usage: { ...known(1200, 80), cachedTokens: 1000 }, outgoingToolCallIds: [] });
+    const summary = tracker.summarize(ID);
+    assert.deepEqual(summary, {
+      kind: 'complete', promptTokens: 2200, completionTokens: 130, totalTokens: 2330, cachedTokens: 1000,
+    });
+    assert.equal(
+      formatReplyTokenSummaryLine(summary),
+      'Tokens: input 2,200 (1,000 cached) | output 130 | total 2,330'
+    );
+  });
+
+  test('ignores cached tokens from a round whose prompt count is unknown', () => {
+    const tracker = new ReplyTokenUsageTracker();
+    tracker.beginRound(ID, []);
+    tracker.recordRound(ID, {
+      usage: { promptTokens: 0, completionTokens: 10, cachedTokens: 500, promptKnown: false, completionKnown: true },
+      outgoingToolCallIds: [],
+    });
+    const summary = tracker.summarize(ID);
+    assert.equal(summary.kind === 'unavailable' ? undefined : summary.cachedTokens, undefined);
+  });
+
+  test('a summary line with cached tokens is still stripped from history', () => {
+    const line = formatReplyTokenSummaryLine({
+      kind: 'complete', promptTokens: 2200, completionTokens: 130, totalTokens: 2330, cachedTokens: 1000,
+    });
+    assert.equal(stripReplyTokenSummary(`Done.\n\n${line}`), 'Done.');
   });
 });

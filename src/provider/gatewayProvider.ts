@@ -60,6 +60,10 @@ const MODEL_AFFECTING_KEYS: readonly string[] = [
   'github.copilot.llm-gateway.enableToolCalling',
   'github.copilot.llm-gateway.customHeaders',
   'github.copilot.llm-gateway.modelContextWindows',
+  // The Thinking Effort picker schema is built per model from these.
+  'github.copilot.llm-gateway.perModelOptions',
+  'github.copilot.llm-gateway.thinkingEffortParameter',
+  'github.copilot.llm-gateway.thinkingEffortPicker',
 ];
 
 /**
@@ -366,15 +370,14 @@ export class GatewayProvider
    * Provide token count estimation (rough char/4 approximation). Non-text
    * parts contribute too — see {@link countMessageTokens}.
    */
-  async provideTokenCount(
+  provideTokenCount(
     _model: vscode.LanguageModelChatInformation,
     text: string | vscode.LanguageModelChatMessage,
     _token: vscode.CancellationToken
   ): Promise<number> {
-    if (typeof text === 'string') {
-      return estimateTextTokens(text);
-    }
-    return countMessageTokens(text);
+    return Promise.resolve(
+      typeof text === 'string' ? estimateTextTokens(text) : countMessageTokens(text)
+    );
   }
 
   // ---------- status ----------

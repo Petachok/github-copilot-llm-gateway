@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { GatewayConfig } from '../config/gatewayConfig';
 import { TOKEN_CONSTANTS } from '../chat/tokenBudget';
-import { DEFAULT_THINKING_EFFORT_PARAMETER } from '../config/thinkingEffort';
+import { DEFAULT_THINKING_EFFORT_PARAMETER, parseThinkingEffortPickerMode } from '../config/thinkingEffort';
 import { DEFAULT_USAGE_ENDPOINT, DEFAULT_USAGE_THRESHOLDS } from '../status/dailyUsage';
 import { DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS } from './usageService';
 import {
@@ -69,6 +69,7 @@ export class ConfigService {
       thinkingEffortParameter:
         config.get<string>('thinkingEffortParameter', DEFAULT_THINKING_EFFORT_PARAMETER)?.trim() ||
         DEFAULT_THINKING_EFFORT_PARAMETER,
+      thinkingEffortPicker: parseThinkingEffortPickerMode(config.get<string>('thinkingEffortPicker', 'auto')),
       modelContextWindows: config.get<Record<string, number>>('modelContextWindows', {}) ?? {},
       enableInlineCompletion: config.get<boolean>('enableInlineCompletion', false),
       inlineCompletionModel: config.get<string>('inlineCompletionModel', ''),
@@ -78,6 +79,7 @@ export class ConfigService {
       inlineCompletionMaxPrefixChars: config.get<number>('inlineCompletionMaxPrefixChars', 4000),
       inlineCompletionMaxSuffixChars: config.get<number>('inlineCompletionMaxSuffixChars', 1000),
       showReplyTokenUsage: config.get<boolean>('showReplyTokenUsage', false),
+      sessionAffinityHeader: config.get<string>('sessionAffinityHeader', '') ?? '',
       usageEndpoint: config.get<string>('usageEndpoint', DEFAULT_USAGE_ENDPOINT) ?? '',
       usageRefreshInterval: config.get<number>(
         'usageRefreshInterval',

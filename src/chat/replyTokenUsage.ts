@@ -51,6 +51,32 @@ export function extractToolResultIds(messages: readonly OpenAIMessage[]): string
   return ids;
 }
 
+/** RFC 9110 field-name token; anything else makes `fetch` throw. */
+const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/** Visible ASCII only, so an odd id can never fail header serialization. */
+const HEADER_VALUE_PATTERN = /^[\x21-\x7e]+$/;
+/** Headers the client already sets; the affinity header must not replace them. */
+const RESERVED_HEADER_NAMES = new Set(['authorization', 'content-type', 'content-length', 'host']);
+
+/**
+ * Build the session-affinity headers for one chat request. Returns an empty
+ * object when the feature is off (no header name configured), when the
+ * configured name isn't a valid or allowed header name, or when the request
+ * carries no usable conversation identity — the caller then sends nothing
+ * and the gateway routes as usual (fail closed, per the
+ * {@link extractReplyIdentity} contract above).
+ */
+export function sessionAffinityHeaders(
+  headerName: string,
+  replyIdentity: ReplyIdentity | undefined
+): Record<string, string> {
+  const name = headerName.trim();
+  if (!name || !replyIdentity) { return {}; }
+  if (!HEADER_NAME_PATTERN.test(name) || RESERVED_HEADER_NAMES.has(name.toLowerCase())) { return {}; }
+  if (!HEADER_VALUE_PATTERN.test(replyIdentity.conversationId)) { return {}; }
+  return { [name]: replyIdentity.conversationId };
+}
+
 /**
  * One round's server-reported usage, plus whether each field was actually
  * present on the wire (as opposed to defaulted to 0 by normalization). A
@@ -59,6 +85,8 @@ export function extractToolResultIds(messages: readonly OpenAIMessage[]): string
 export interface RoundUsage {
   readonly promptTokens: number;
   readonly completionTokens: number;
+  /** Prompt tokens served from the server's cache (a subset of `promptTokens`); 0 when not reported. */
+  readonly cachedTokens?: number;
   readonly promptKnown: boolean;
   readonly completionKnown: boolean;
 }
@@ -70,14 +98,23 @@ export interface RoundOutcome {
   readonly outgoingToolCallIds: readonly string[];
 }
 
+interface ReplyTokenCounts {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+  /** Cached prompt tokens across the reply's rounds; absent or 0 when the server reported none. */
+  readonly cachedTokens?: number;
+}
+
 export type ReplyTokenSummary =
-  | { readonly kind: 'complete'; readonly promptTokens: number; readonly completionTokens: number; readonly totalTokens: number }
-  | { readonly kind: 'partial'; readonly promptTokens: number; readonly completionTokens: number; readonly totalTokens: number }
+  | ({ readonly kind: 'complete' } & ReplyTokenCounts)
+  | ({ readonly kind: 'partial' } & ReplyTokenCounts)
   | { readonly kind: 'unavailable' };
 
 interface ChainState {
   promptTokens: number;
   completionTokens: number;
+  cachedTokens: number;
   hadAnyUsage: boolean;
   hadMissingUsage: boolean;
   pendingToolCallIds: ReadonlySet<string>;
@@ -100,6 +137,7 @@ function emptyChain(): ChainState {
   return {
     promptTokens: 0,
     completionTokens: 0,
+    cachedTokens: 0,
     hadAnyUsage: false,
     hadMissingUsage: false,
     pendingToolCallIds: new Set(),
@@ -150,7 +188,10 @@ export class ReplyTokenUsageTracker {
 
     const promptKnown = outcome.usage?.promptKnown ?? false;
     const completionKnown = outcome.usage?.completionKnown ?? false;
-    if (promptKnown) { chain.promptTokens += sanitize(outcome.usage!.promptTokens); }
+    if (promptKnown) {
+      chain.promptTokens += sanitize(outcome.usage!.promptTokens);
+      chain.cachedTokens += sanitize(outcome.usage!.cachedTokens ?? 0);
+    }
     if (completionKnown) { chain.completionTokens += sanitize(outcome.usage!.completionTokens); }
     chain.hadAnyUsage = chain.hadAnyUsage || promptKnown || completionKnown;
     chain.hadMissingUsage = chain.hadMissingUsage || !(promptKnown && completionKnown);
@@ -162,10 +203,13 @@ export class ReplyTokenUsageTracker {
   summarize(identity: ReplyIdentity): ReplyTokenSummary {
     const chain = this.chains.get(chainKey(identity));
     if (!chain?.hadAnyUsage) { return { kind: 'unavailable' }; }
-    const totalTokens = chain.promptTokens + chain.completionTokens;
-    return chain.hadMissingUsage
-      ? { kind: 'partial', promptTokens: chain.promptTokens, completionTokens: chain.completionTokens, totalTokens }
-      : { kind: 'complete', promptTokens: chain.promptTokens, completionTokens: chain.completionTokens, totalTokens };
+    const counts: ReplyTokenCounts = {
+      promptTokens: chain.promptTokens,
+      completionTokens: chain.completionTokens,
+      totalTokens: chain.promptTokens + chain.completionTokens,
+      ...(chain.cachedTokens > 0 ? { cachedTokens: chain.cachedTokens } : {}),
+    };
+    return { kind: chain.hadMissingUsage ? 'partial' : 'complete', ...counts };
   }
 
   /** Clear a reply's state. Call once its terminal (tool-call-free) round completes. */
@@ -206,8 +250,11 @@ export function formatReplyTokenSummaryLine(summary: ReplyTokenSummary): string 
     return 'Tokens: input unavailable | output unavailable | total unavailable';
   }
   const label = summary.kind === 'partial' ? 'Tokens (partial)' : 'Tokens';
+  // Cached tokens are part of the input count, so they're shown alongside it
+  // rather than as a fourth field.
+  const cached = summary.cachedTokens ? ` (${formatWithCommas(summary.cachedTokens)} cached)` : '';
   return (
-    `${label}: input ${formatWithCommas(summary.promptTokens)} | ` +
+    `${label}: input ${formatWithCommas(summary.promptTokens)}${cached} | ` +
     `output ${formatWithCommas(summary.completionTokens)} | ` +
     `total ${formatWithCommas(summary.totalTokens)}`
   );

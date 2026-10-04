@@ -4,6 +4,8 @@
  * framework-supplied overrides — everything downstream reads this shape
  * instead of touching `vscode.workspace.getConfiguration` directly.
  */
+import type { ThinkingEffortPickerMode } from './thinkingEffort';
+
 export interface GatewayConfig {
   serverUrl: string;
   apiKey?: string;
@@ -25,6 +27,11 @@ export interface GatewayConfig {
    * change it for backends that name the parameter differently.
    */
   thinkingEffortParameter: string;
+  /**
+   * Which gateway models get VS Code's native Thinking Effort control in the
+   * chat model picker. See `ThinkingEffortPickerMode`.
+   */
+  thinkingEffortPicker: ThinkingEffortPickerMode;
   /**
    * Per-model context-window overrides (total tokens) keyed by model id /
    * wildcard. Wins over server-reported values — for servers that report the
@@ -52,6 +59,14 @@ export interface GatewayConfig {
    * (no line, no error) when they're absent. See replyTokenUsage.ts.
    */
   showReplyTokenUsage: boolean;
+  /**
+   * Name of an HTTP header carrying a per-conversation session id, sent on
+   * every chat-completions request so gateways can pin the conversation to
+   * one backend (LiteLLM `session_affinity` reads `x-litellm-session-id`).
+   * Empty disables the header. See replyTokenUsage.ts for the identity
+   * source and its fail-closed contract.
+   */
+  sessionAffinityHeader: string;
   /**
    * Path of the gateway's daily-usage endpoint, joined onto `serverUrl`.
    * Empty disables the status-bar quota display. Servers without the

@@ -317,7 +317,8 @@ export class GatewayClient {
    */
   public async *streamChatCompletion(
     request: OpenAIChatCompletionRequest,
-    cancellationToken: vscode.CancellationToken
+    cancellationToken: vscode.CancellationToken,
+    extraHeaders?: Record<string, string>
   ): AsyncGenerator<GatewayStreamChunk, void, unknown> {
     const url = `${normalizeBaseUrl(this.config.serverUrl)}/v1/chat/completions`;
     const accumulator = new ToolCallAccumulator();
@@ -326,7 +327,7 @@ export class GatewayClient {
     try {
       const response = await fetch(url, {
         method: 'POST',
-        headers: { ...this.getHeaders(), 'Content-Type': 'application/json' },
+        headers: { ...this.getHeaders(), ...extraHeaders, 'Content-Type': 'application/json' },
         // `stream_options.include_usage` tells OpenAI-compatible servers to
         // emit a final SSE chunk containing `usage` totals once the model
         // finishes. We forward that to VS Code's chat context-window widget
@@ -380,7 +381,8 @@ export class GatewayClient {
 
     while (true) {
       if (cancellationToken.isCancellationRequested) {
-        reader.cancel();
+        // Best effort: the stream may already be closed or errored.
+        reader.cancel().catch(() => undefined);
         return;
       }
 
@@ -774,17 +776,42 @@ export function extractUsage(raw: unknown): OpenAIUsage | undefined {
     return undefined;
   }
 
-  const detailsRaw = obj.prompt_tokens_details;
-  const cached = detailsRaw && typeof detailsRaw === 'object'
-    ? toNonNegativeNumber((detailsRaw as Record<string, unknown>).cached_tokens)
-    : 0;
+  // Cache figures come from OpenAI's `prompt_tokens_details` (vLLM with
+  // --enable-prompt-tokens-details, llama.cpp, Ollama, LiteLLM), falling back
+  // to the top-level Anthropic-style names some proxies pass through.
+  const promptDetails = asRecord(obj.prompt_tokens_details);
+  const completionDetails = asRecord(obj.completion_tokens_details);
+  const cached = firstNonNegativeNumber(promptDetails?.cached_tokens, obj.cache_read_input_tokens) ?? 0;
+  const cacheCreation = firstNonNegativeNumber(
+    promptDetails?.cache_creation_input_tokens,
+    obj.cache_creation_input_tokens
+  );
+  const reasoning = firstNonNegativeNumber(completionDetails?.reasoning_tokens);
 
   return {
     prompt_tokens: prompt,
     completion_tokens: completion,
     total_tokens: total,
-    prompt_tokens_details: { cached_tokens: cached },
+    prompt_tokens_details: {
+      cached_tokens: cached,
+      ...(cacheCreation === undefined ? {} : { cache_creation_input_tokens: cacheCreation }),
+    },
+    ...(reasoning === undefined ? {} : { completion_tokens_details: { reasoning_tokens: reasoning } }),
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+}
+
+/** The first argument that is a finite number, clamped to zero; `undefined` if none is. */
+function firstNonNegativeNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, value);
+    }
+  }
+  return undefined;
 }
 
 function toNonNegativeNumber(value: unknown, fallback = 0): number {

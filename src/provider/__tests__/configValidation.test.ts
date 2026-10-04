@@ -33,6 +33,7 @@ function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     inlineCompletionMaxPrefixChars: 4000,
     inlineCompletionMaxSuffixChars: 1000,
     showReplyTokenUsage: true,
+    sessionAffinityHeader: '',
 
     usageEndpoint: '/v1/usage/current',
 
@@ -42,6 +43,7 @@ function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
 
     usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
+    thinkingEffortPicker: 'auto',
     loopGuardRepetition: true,
     loopGuardToolNudgeAfter: 3,
     loopGuardToolForceAnswerAfter: 5,
