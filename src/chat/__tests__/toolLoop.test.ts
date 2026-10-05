@@ -6,7 +6,7 @@ import {
   buildToolLoopNote,
   countRepeatedToolRounds,
   guardToolLoop,
-  isToolHistoryRejection,
+  isRepeatedToolCall,
   resolveToolLoopAction,
 } from '../toolLoop';
 
@@ -36,7 +36,11 @@ describe('countRepeatedToolRounds', () => {
       ...round('c2', 'read_file', READ_ARGS, 'file body'),
       ...round('c3', 'read_file', READ_ARGS, 'file body'),
     ];
-    assert.deepEqual(countRepeatedToolRounds(messages), { count: 3, toolNames: ['read_file'] });
+    assert.deepEqual(countRepeatedToolRounds(messages), {
+      count: 3,
+      toolNames: ['read_file'],
+      calls: [{ name: 'read_file', arguments: JSON.stringify(READ_ARGS) }],
+    });
   });
 
   test('a different result breaks the chain', () => {
@@ -99,7 +103,10 @@ describe('countRepeatedToolRounds', () => {
       { role: 'tool', tool_call_id: 'b2', content: 'no matches' },
       { role: 'tool', tool_call_id: 'a2', content: 'file body' },
     ];
-    assert.deepEqual(countRepeatedToolRounds(messages), { count: 2, toolNames: ['grep', 'read_file'] });
+    const status = countRepeatedToolRounds(messages);
+    assert.equal(status.count, 2);
+    assert.deepEqual(status.toolNames, ['grep', 'read_file']);
+    assert.deepEqual(status.calls.map((c) => c.name), ['grep', 'read_file']);
   });
 
   test('returns 0 when the latest assistant message made no tool calls', () => {
@@ -134,14 +141,14 @@ describe('countRepeatedToolRounds', () => {
 });
 
 describe('resolveToolLoopAction', () => {
-  test('escalates from nudge to forced answer', () => {
+  test('escalates from nudge to block', () => {
     assert.equal(resolveToolLoopAction(2, 3, 5), 'none');
     assert.equal(resolveToolLoopAction(3, 3, 5), 'nudge');
-    assert.equal(resolveToolLoopAction(5, 3, 5), 'forceAnswer');
+    assert.equal(resolveToolLoopAction(5, 3, 5), 'block');
   });
 
   test('a threshold below 2 disables that level', () => {
-    assert.equal(resolveToolLoopAction(7, 0, 5), 'forceAnswer');
+    assert.equal(resolveToolLoopAction(7, 0, 5), 'block');
     assert.equal(resolveToolLoopAction(9, 3, 0), 'nudge');
     assert.equal(resolveToolLoopAction(10, 0, 0), 'none');
     assert.equal(resolveToolLoopAction(1, 1, 1), 'none');
@@ -169,15 +176,39 @@ describe('appendToolLoopNudge', () => {
 });
 
 describe('buildToolLoopNote', () => {
+  const status = { count: 3, toolNames: ['read_file'], calls: [] };
+
   test('names the repeated tools and the count', () => {
-    const note = buildToolLoopNote({ count: 3, toolNames: ['read_file'] }, false);
+    const note = buildToolLoopNote(status, false);
     assert.match(note, /read_file/);
     assert.match(note, /3 times/);
-    assert.doesNotMatch(note, /disabled/);
+    assert.doesNotMatch(note, /blocked/);
   });
 
-  test('tells the model tools are disabled when forcing an answer', () => {
-    assert.match(buildToolLoopNote({ count: 5, toolNames: ['read_file'] }, true), /disabled/);
+  test('tells the model the call is blocked, not that tools are gone', () => {
+    const note = buildToolLoopNote({ ...status, count: 5 }, true);
+    assert.match(note, /blocked/);
+    assert.match(note, /different tool or use different arguments/);
+  });
+});
+
+describe('isRepeatedToolCall', () => {
+  const status = countRepeatedToolRounds([
+    ...PROMPT,
+    ...round('c1', 'read_file', READ_ARGS, 'file body'),
+    ...round('c2', 'read_file', READ_ARGS, 'file body'),
+  ]);
+  const blocked = isRepeatedToolCall(status);
+
+  test('matches the looping call whatever the argument order', () => {
+    assert.equal(blocked('read_file', READ_ARGS), true);
+    assert.equal(blocked('read_file', { endLine: 50, startLine: 1, filePath: '/repo/src/a.ts' }), true);
+  });
+
+  test('lets a different tool or different arguments through', () => {
+    assert.equal(blocked('grep_search', { query: 'a' }), false);
+    assert.equal(blocked('read_file', { ...READ_ARGS, endLine: 100 }), false);
+    assert.equal(blocked('read_file', { filePath: '/repo/src/b.ts' }), false);
   });
 });
 
@@ -188,13 +219,14 @@ describe('guardToolLoop', () => {
     ...round('c2', 'read_file', READ_ARGS, 'file body'),
     ...round('c3', 'read_file', READ_ARGS, 'file body'),
   ];
-  const options = { toolsOffered: true, nudgeAfter: 2, forceAnswerAfter: 3, canForceAnswer: true };
+  const options = { toolsOffered: true, nudgeAfter: 2, blockAfter: 3, canBlock: true };
   const lastContent = (messages: OpenAIMessage[]): string => String(messages[messages.length - 1].content);
 
-  test('forces an answer and tells the model through the latest tool result', () => {
+  test('blocks the repeated call and tells the model through the latest tool result', () => {
     const guard = guardToolLoop(looping, options);
-    assert.equal(guard.action, 'forceAnswer');
-    assert.match(lastContent(guard.messages), /Tools are disabled/);
+    assert.equal(guard.action, 'block');
+    assert.match(lastContent(guard.messages), /now blocked/);
+    assert.deepEqual(guard.status.calls.map((c) => c.name), ['read_file']);
   });
 
   test('leaves requests that offer no tools alone', () => {
@@ -204,23 +236,8 @@ describe('guardToolLoop', () => {
   });
 
   test('only nudges a caller that requires a tool call', () => {
-    const guard = guardToolLoop(looping, { ...options, canForceAnswer: false });
+    const guard = guardToolLoop(looping, { ...options, canBlock: false });
     assert.equal(guard.action, 'nudge');
     assert.match(lastContent(guard.messages), /will not produce new information/);
-  });
-});
-
-describe('isToolHistoryRejection', () => {
-  test('matches a request-validation failure from the chat endpoint', () => {
-    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: Chat completion failed: 400 Bad Request - {"error":"tools required"}')), true);
-    assert.equal(isToolHistoryRejection(new Error('Chat completion failed: 422 Unprocessable Entity - x')), true);
-  });
-
-  test('ignores other failures', () => {
-    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: Chat completion failed: 500 Internal Server Error - x')), false);
-    assert.equal(isToolHistoryRejection(new Error('Chat completion failed: 404 Not Found - x')), false);
-    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: fetch failed: ECONNREFUSED')), false);
-    assert.equal(isToolHistoryRejection(new Error('Inference server reported an error mid-stream: 400')), false);
-    assert.equal(isToolHistoryRejection('400'), false);
   });
 });

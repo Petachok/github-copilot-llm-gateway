@@ -16,7 +16,7 @@ import {
 } from '../chat/tokenBudget';
 import { tryRepairJson } from '../chat/jsonRepair';
 import { fillMissingRequiredProperties } from '../chat/toolSchema';
-import { guardToolLoop, isToolHistoryRejection } from '../chat/toolLoop';
+import { ToolCallFilter, guardToolLoop, isRepeatedToolCall } from '../chat/toolLoop';
 import {
   StreamChunk,
   StreamReporter,
@@ -201,13 +201,9 @@ export class ChatRequestHandler {
     // (~93 tools, ~24K chars) would reserve context that gets thrown away by
     // buildToolsConfig() later — collapsing the user's prompt when tool
     // calling is disabled.
-    const { tools: offeredTools, schemas: toolSchemas } = this.buildToolsConfig(config, options);
-    // A text-only round leaves the tools out: with them in the prompt a model
-    // that ignores tool_choice 'none' calls one anyway, and vLLM then streams
-    // the call as text. Backends that reject tool history without tool
-    // definitions get them back on a retry (see the catch below).
-    let withholdTools = loopGuard.forceAnswer;
-    const toolChoice: ToolChoice | undefined = loopGuard.forceAnswer ? 'none' : this.mapToolChoice(options.toolMode);
+    const { tools: filteredTools, schemas: toolSchemas } = this.buildToolsConfig(config, options);
+    const toolsSerializedLength = filteredTools ? JSON.stringify(filteredTools).length : 0;
+    const toolChoice = this.mapToolChoice(options.toolMode);
 
     // Once anything has been streamed to the chat view we can no longer
     // transparently re-issue the request without duplicating output, so track
@@ -225,8 +221,6 @@ export class ChatRequestHandler {
     // The whole budget → request → stream pipeline, resolved against the
     // model's current context size, so a corrected context can re-run it.
     const attempt = async (): Promise<void> => {
-      const filteredTools = withholdTools ? undefined : offeredTools;
-      const toolsSerializedLength = filteredTools ? JSON.stringify(filteredTools).length : 0;
       const modelMaxContext = catalog.resolveModelMaxContext(model);
       // Re-read per attempt: a context learned from an overflow error proves
       // the server enforces one combined limit, which flips this back to false.
@@ -342,7 +336,7 @@ export class ChatRequestHandler {
         resolveToolCallArgs: (toolCall) => this.resolveToolCallArgs(toolCall, toolSchemas),
         maxOutputTokens: safeMaxOutputTokens,
         detectRepetition: config.loopGuardRepetition,
-        dropToolCalls: loopGuard.forceAnswer,
+        withholdToolCall: loopGuard.withholdToolCall,
       });
 
       log(
@@ -368,20 +362,15 @@ export class ChatRequestHandler {
         // (issue #55: llama-server router mode reports nothing up-front, so
         // the first request can overshoot). Learn it and, if nothing has been
         // streamed to the chat view yet, transparently retry once with the
-        // corrected budget. A text-only round that was sent without tools
-        // likewise gets one retry with them when the server rejected it.
-        const learnedContext = catalog.learnContextSizeFromError(model, error);
-        if (partsReported || token.isCancellationRequested) {
+        // corrected budget.
+        if (
+          !catalog.learnContextSizeFromError(model, error) ||
+          partsReported ||
+          token.isCancellationRequested
+        ) {
           throw error;
         }
-        if (learnedContext) {
-          log('Retrying chat request with corrected context size...');
-        } else if (withholdTools && isToolHistoryRejection(error)) {
-          log("Loop guard: the server rejected the text-only request without tool definitions; retrying with the tools and tool_choice 'none'...");
-          withholdTools = false;
-        } else {
-          throw error;
-        }
+        log('Retrying chat request with corrected context size...');
         await attempt();
       }
       this.deps.onCompleted(model.id, modelName, capturedUsage);
@@ -417,41 +406,43 @@ export class ChatRequestHandler {
 
   /**
    * Break agent tool-call loops (same call, same result, round after round):
-   * nudge the model through the latest tool result, then ask for a text-only
-   * answer. The visible note bypasses `trackingProgress` so the
-   * context-overflow retry, which needs nothing streamed yet, still works.
+   * nudge the model through the latest tool result, then block a repeat of
+   * that exact call while letting any other call through, so the agent can
+   * change direction instead of stopping. The visible note bypasses
+   * `trackingProgress` so the context-overflow retry, which needs nothing
+   * streamed yet, still works.
    */
   private applyToolLoopGuard(
     openAIMessages: OpenAIMessage[],
     config: GatewayConfig,
     options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>
-  ): { messages: OpenAIMessage[]; forceAnswer: boolean } {
+  ): { messages: OpenAIMessage[]; withholdToolCall?: ToolCallFilter } {
     const { action, status, messages } = guardToolLoop(openAIMessages, {
       toolsOffered: config.enableToolCalling && !!options.tools?.length,
       nudgeAfter: config.loopGuardToolNudgeAfter,
-      forceAnswerAfter: config.loopGuardToolForceAnswerAfter,
-      canForceAnswer: options.toolMode !== vscode.LanguageModelChatToolMode.Required,
+      blockAfter: config.loopGuardToolBlockAfter,
+      canBlock: options.toolMode !== vscode.LanguageModelChatToolMode.Required,
     });
-    const forceAnswer = action === 'forceAnswer';
     if (action === 'none') {
-      return { messages, forceAnswer };
+      return { messages };
     }
 
     const names = status.toolNames.join(', ').replaceAll('`', '');
     this.deps.log(
       `Loop guard: ${names} repeated ${status.count}x with identical arguments and results; ${
-        forceAnswer ? 'asking for a text-only answer' : 'nudging the model'
+        action === 'block' ? 'blocking a repeat of that call' : 'nudging the model'
       }`
     );
-    if (forceAnswer) {
-      progress.report(
-        new vscode.LanguageModelTextPart(
-          `*(Loop guard: the model called \`${names}\` ${status.count} times in a row with identical results, so tools are disabled for this reply.)*\n\n`
-        )
-      );
+    if (action !== 'block') {
+      return { messages };
     }
-    return { messages, forceAnswer };
+    progress.report(
+      new vscode.LanguageModelTextPart(
+        `*(Loop guard: the model called \`${names}\` ${status.count} times in a row with identical results, so repeating that call is blocked.)*\n\n`
+      )
+    );
+    return { messages, withholdToolCall: isRepeatedToolCall(status) };
   }
 
   private buildToolsConfig(
@@ -591,10 +582,11 @@ export class ChatRequestHandler {
     if (stats.repetitionStopped) {
       log('WARNING: Loop guard stopped a response that kept repeating itself and closed the request.');
     }
-    if (stats.toolMarkupStopped) {
-      log("WARNING: Loop guard cut a text-only round where the model wrote a tool call as plain text; the server skipped its tool parser under tool_choice 'none'.");
-    } else if (stats.droppedToolCalls) {
-      log(`WARNING: Loop guard withheld ${stats.droppedToolCalls} tool call(s) from a text-only round; the server ignored tool_choice 'none'.`);
+    if (stats.droppedToolCalls) {
+      log(
+        `WARNING: Loop guard withheld ${stats.droppedToolCalls} repeat(s) of the blocked tool call` +
+          (stats.totalToolCalls === 0 ? '; the model made no other call, so the turn ends here.' : '; other calls went through.')
+      );
     }
   }
 

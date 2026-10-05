@@ -43,7 +43,7 @@ If native BYOK already works well for you, you don't need this extension. If you
 | **Reasoning / thinking handling** | Routes `<think>`/`<thinking>` blocks (and a separate `reasoning_content` field) into Copilot's thinking UI instead of dumping chain-of-thought into the chat — handling tags split across stream chunks and LM Studio's stray-tag quirk, with a fallback when a model exhausts its budget mid-thought. |
 | **Safe context budgeting**   | Auto-detects the real context window from `/v1/models` (across vLLM, LiteLLM, Ollama, llama.cpp, and LocalAI field names) and shrinks `max_tokens` conservatively so small servers don't return context-length errors.                                            |
 | **Tool-call tuning**         | Sends a low agent temperature and exposes parallel-tool-call / tool-choice toggles to stabilize tool-call formatting from finicky fine-tuned models.                                                                                                      |
-| **Loop guard**               | Stops a response when a model gets stuck repeating the same text or thinking, and closes the request so the server stops generating. In agent mode, warns a model that keeps making the same tool call with the same result, then asks it for a text-only answer. |
+| **Loop guard**               | Stops a response when a model gets stuck repeating the same text or thinking, and closes the request so the server stops generating. In agent mode, warns a model that keeps making the same tool call with the same result, then blocks that one call while letting the agent carry on with anything else. |
 | **Actionable diagnostics**   | Turns raw connection / auth / timeout and tool-parser failures into concrete fixes (remove a stray `/v1`, drop a `Bearer ` prefix, raise the timeout, disable tool calling).                                                                              |
 
 It also keeps the familiar benefits of self-hosting: inference stays on your network, there are no per-token fees, and your self-hosted models don't draw down Copilot premium quota.
@@ -351,15 +351,15 @@ These settings control how the extension handles agentic features like code edit
 Small and quantized models sometimes get stuck. The loop guard catches two cases:
 
 - **Repeating output**: the model writes the same sentence or paragraph over and over, in its answer or its thinking. The gateway stops the response, closes the request so the server stops generating, and adds a short note. Ask the model to continue or rephrase.
-- **Tool-call loops**: in agent mode, the model keeps making the same tool call with the same arguments and gets the same result each time. The gateway first adds a warning to the tool result telling the model to change approach. If the loop continues, it sends the next request without the tools, asks for a text-only answer, and shows a note in the chat. If the server rejects the tool history without tool definitions, the request is resent with the tools and `tool_choice: none`. A tool call the model makes anyway is withheld, and one that arrives as plain text (`<tool_call>…` markup, which vLLM passes through when it is not running its tool parser) is cut off where it starts. Only identical results count: polling a build that keeps printing output is not affected, but polling one that prints nothing new is.
+- **Tool-call loops**: in agent mode, the model keeps making the same tool call with the same arguments and gets the same result each time. The gateway first adds a warning to the tool result telling the model to change approach. If the loop continues, it blocks that exact call: the model is told the call will not run again, a note is shown in the chat, and a repeat of it is withheld. Every other tool call (a different tool, or the same tool with different arguments) still goes through, so the agent can take a new direction and keep working. Only if the model does nothing but repeat the blocked call does the reply end, with a note; send a follow-up with a hint to continue. Only identical results count: polling a build that keeps printing output is not affected, but polling one that prints nothing new is.
 
-| Setting                                | Default | Description                                                                                                  |
-| -------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| **Loop Guard Repetition**              | `true`  | Stop a response that keeps repeating itself.                                                                 |
-| **Loop Guard Tool Nudge After**        | `3`     | Warn the model after this many identical tool calls in a row (same arguments, same result). `0` turns it off. |
-| **Loop Guard Tool Force Answer After** | `5`     | Ask for a text-only answer after this many identical tool calls in a row. `0` turns it off.                  |
+| Setting                         | Default | Description                                                                                                  |
+| ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
+| **Loop Guard Repetition**       | `true`  | Stop a response that keeps repeating itself.                                                                 |
+| **Loop Guard Tool Nudge After** | `3`     | Warn the model after this many identical tool calls in a row (same arguments, same result). `0` turns it off. |
+| **Loop Guard Tool Block After** | `5`     | Block the repeated call after this many identical tool calls in a row; other calls still run. `0` turns it off. |
 
-> **Note**: A request to repeat something many times on purpose is also cut off. Turn off **Loop Guard Repetition** if you need that.
+> **Note**: A request to repeat something many times on purpose is also cut off. Turn off **Loop Guard Repetition** if you need that. To turn off the tool-call guard entirely, set both **Nudge After** and **Block After** to `0`.
 
 ### Diagnostic Settings
 

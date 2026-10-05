@@ -10,7 +10,6 @@
 
 import { ThinkingParser, ThinkingChunk } from './thinking';
 import { RepetitionDetector } from './repetitionDetector';
-import { ToolCallMarkupScanner } from './toolCallMarkup';
 import { OpenAIUsage, OpenAIUsageAvailability } from '../api/types';
 
 export interface StreamReporter {
@@ -59,14 +58,8 @@ export interface StreamStats {
   outputTruncated?: boolean;
   /** True when the loop guard cut the stream because the output became a repeating cycle. */
   repetitionStopped?: boolean;
-  /** Tool calls withheld because the request asked for a text-only answer. */
+  /** Tool calls withheld by `withholdToolCall` (the loop guard's blocked repeat). */
   droppedToolCalls?: number;
-  /**
-   * True when a withheld tool call arrived as native markup inside the text
-   * (the server was not running its tool parser), so the reply was cut at the
-   * marker. Counted in `droppedToolCalls` too.
-   */
-  toolMarkupStopped?: boolean;
   /**
    * True once a usage frame has been dispatched to the reporter. Internal
    * book-keeping to dedupe re-emitted totals from chatty servers; optional
@@ -94,12 +87,8 @@ export interface StreamResponseParams {
   maxOutputTokens?: number;
   /** Stop the stream once text or thinking degenerates into a repeating cycle. */
   detectRepetition?: boolean;
-  /**
-   * Withhold tool calls on a text-only round. A server may still return one
-   * (Ollama ignores `tool_choice: 'none'`), or stream the model's tool-call
-   * markup as plain text (vLLM without its tool parser running).
-   */
-  dropToolCalls?: boolean;
+  /** Return true to withhold a tool call (after argument repair) instead of reporting it. */
+  withholdToolCall?: (name: string, args: Record<string, unknown>) => boolean;
 }
 
 const REPETITION_STOP_NOTE =
@@ -107,9 +96,9 @@ const REPETITION_STOP_NOTE =
   'Ask it to continue or rephrase the request. Turn this off with ' +
   '`github.copilot.llm-gateway.loopGuardRepetition`.)*';
 
-const TOOL_CALLS_DROPPED_NOTE =
-  '*(Loop guard: tools were disabled for this reply, but the model tried to call a tool again, ' +
-  'so the reply was stopped. Try rephrasing the request or switching models.)*';
+const BLOCKED_TOOL_CALL_NOTE =
+  '*(Loop guard: the model made the blocked tool call again instead of changing approach, so this reply ends here. ' +
+  'Send a follow-up with a hint on how to proceed, or adjust `github.copilot.llm-gateway.loopGuardToolBlockAfter`.)*';
 
 const THOUSANDS_FORMAT = new Intl.NumberFormat('en-US', { useGrouping: true });
 
@@ -131,27 +120,18 @@ function buildOutputBudgetFallback(hadThinking: boolean, maxOutputTokens: number
   );
 }
 
-function reportText(text: string, reporter: StreamReporter, stats: StreamStats): void {
-  if (text) {
-    stats.totalTextParts++;
-    reporter.reportText(text);
-  }
-}
-
 /**
  * Dispatch a single ThinkingParser piece to the reporter, updating stats.
  *
  * `allowForceClose` is true only when flushing the parser at end-of-stream —
  * an 'E' piece mid-stream is just a normal end-of-thinking marker, while an
  * 'E' piece at flush time indicates the stream truncated mid-think block.
- * `markupScanner` is set only when tool calls are being withheld.
  */
 function reportParserPiece(
   piece: ThinkingChunk,
   reporter: StreamReporter,
   stats: StreamStats,
-  allowForceClose: boolean,
-  markupScanner: ToolCallMarkupScanner | undefined
+  allowForceClose: boolean
 ): void {
   if (piece.t === 'T') {
     stats.hadThinking = true;
@@ -165,15 +145,9 @@ function reportParserPiece(
     reporter.reportThinkingDone();
     return;
   }
-  if (!markupScanner) {
-    reportText(piece.c, reporter, stats);
-    return;
-  }
-  const scanned = markupScanner.push(piece.c);
-  reportText(scanned.text, reporter, stats);
-  if (scanned.cut && !stats.toolMarkupStopped) {
-    stats.toolMarkupStopped = true;
-    stats.droppedToolCalls = (stats.droppedToolCalls ?? 0) + 1;
+  if (piece.c) {
+    stats.totalTextParts++;
+    reporter.reportText(piece.c);
   }
 }
 
@@ -187,8 +161,7 @@ function processStreamChunk(
   parser: ThinkingParser,
   stats: StreamStats,
   inReasoningField: boolean,
-  params: StreamResponseParams,
-  markupScanner: ToolCallMarkupScanner | undefined
+  params: StreamResponseParams
 ): boolean {
   const { reporter } = params;
   if (chunk.reasoning_content) {
@@ -204,7 +177,7 @@ function processStreamChunk(
     }
     stats.totalContentLength += chunk.content.length;
     for (const piece of parser.process(chunk.content)) {
-      reportParserPiece(piece, reporter, stats, false, markupScanner);
+      reportParserPiece(piece, reporter, stats, false);
     }
   }
 
@@ -232,13 +205,14 @@ function reportToolCalls(
   stats: StreamStats,
   params: StreamResponseParams
 ): void {
-  if (params.dropToolCalls) {
-    stats.droppedToolCalls = (stats.droppedToolCalls ?? 0) + toolCalls.length;
-    return;
-  }
   for (const toolCall of toolCalls) {
+    const args = params.resolveToolCallArgs(toolCall);
+    if (params.withholdToolCall?.(toolCall.name, args)) {
+      stats.droppedToolCalls = (stats.droppedToolCalls ?? 0) + 1;
+      continue;
+    }
     stats.totalToolCalls++;
-    params.reporter.reportToolCall(toolCall.id, toolCall.name, params.resolveToolCallArgs(toolCall));
+    params.reporter.reportToolCall(toolCall.id, toolCall.name, args);
   }
 }
 
@@ -258,17 +232,12 @@ function reportStreamEnd(stats: StreamStats, params: StreamResponseParams): void
     return;
   }
 
-  const nothingVisible = stats.totalTextParts === 0 && stats.totalToolCalls === 0;
-  if (stats.toolMarkupStopped) {
-    // Text before the marker is an unfinished thought, so the cut always needs explaining.
-    reporter.reportText(nothingVisible ? TOOL_CALLS_DROPPED_NOTE : `\n\n${TOOL_CALLS_DROPPED_NOTE}`);
+  // A withheld repeat with no other call ends the agent turn, which needs explaining even after some text.
+  if (stats.droppedToolCalls && stats.totalToolCalls === 0) {
+    reporter.reportText(stats.totalTextParts === 0 ? BLOCKED_TOOL_CALL_NOTE : `\n\n${BLOCKED_TOOL_CALL_NOTE}`);
     return;
   }
-  if (!nothingVisible) {
-    return;
-  }
-  if (stats.droppedToolCalls) {
-    reporter.reportText(TOOL_CALLS_DROPPED_NOTE);
+  if (stats.totalTextParts > 0 || stats.totalToolCalls > 0) {
     return;
   }
 
@@ -303,17 +272,13 @@ export async function streamResponse(params: StreamResponseParams): Promise<Stre
 
   const parser = new ThinkingParser();
   const detector = params.detectRepetition ? new RepetitionDetector() : undefined;
-  const markupScanner = params.dropToolCalls ? new ToolCallMarkupScanner() : undefined;
   let inReasoningField = false;
 
   for await (const chunk of chunks) {
     if (isCancelled()) {
       break;
     }
-    inReasoningField = processStreamChunk(chunk, parser, stats, inReasoningField, params, markupScanner);
-    if (stats.toolMarkupStopped) {
-      break;
-    }
+    inReasoningField = processStreamChunk(chunk, parser, stats, inReasoningField, params);
     if (detector?.push(streamedText(chunk))) {
       stats.repetitionStopped = true;
       break;
@@ -323,10 +288,7 @@ export async function streamResponse(params: StreamResponseParams): Promise<Stre
   // Flush any remaining buffered content. 'E' pieces here signal that the
   // stream ended mid-think block.
   for (const piece of parser.flush()) {
-    reportParserPiece(piece, reporter, stats, true, markupScanner);
-  }
-  if (markupScanner) {
-    reportText(markupScanner.flush(), reporter, stats);
+    reportParserPiece(piece, reporter, stats, true);
   }
 
   if (inReasoningField) {

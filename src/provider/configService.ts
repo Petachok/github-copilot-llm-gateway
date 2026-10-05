@@ -95,7 +95,7 @@ export class ConfigService {
       ),
       loopGuardRepetition: config.get<boolean>('loopGuardRepetition', true),
       loopGuardToolNudgeAfter: config.get<number>('loopGuardToolNudgeAfter', 3),
-      loopGuardToolForceAnswerAfter: config.get<number>('loopGuardToolForceAnswerAfter', 5),
+      loopGuardToolBlockAfter: config.get<number>('loopGuardToolBlockAfter', 5),
     };
   }
 

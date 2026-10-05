@@ -6,16 +6,16 @@ import { GatewayClient } from '../../api/client';
 import { OpenAIChatCompletionRequest, OpenAIMessage, OpenAIToolDefinition } from '../../api/types';
 import { GatewayConfig } from '../../config/gatewayConfig';
 import { StreamChunk, StreamStats, streamResponse } from '../responseStreamer';
-import { ToolLoopAction, ToolLoopGuardOptions, guardToolLoop, isToolHistoryRejection } from '../toolLoop';
+import { ToolLoopAction, ToolLoopGuardOptions, guardToolLoop, isRepeatedToolCall } from '../toolLoop';
 
 // Simulates both loop guards end to end: a local fake OpenAI server, the real HTTP client and the stream parser.
 
-type ServerBehavior =
-  | 'repeatToolCall'
-  | 'repeatToolCallIgnoringNone'
-  | 'repeatToolCallAsText'
-  | 'rejectToolHistoryWithoutTools'
-  | 'repeatText';
+/**
+ * `repeatToolCall`: the model never changes its mind.
+ * `changeApproachWhenBlocked`: once told its call is blocked, it searches for something else, then answers.
+ * `repeatText`: a reply that loops on one sentence.
+ */
+type ServerBehavior = 'repeatToolCall' | 'changeApproachWhenBlocked' | 'repeatText';
 
 interface FakeServer {
   readonly url: string;
@@ -42,7 +42,9 @@ const TOOL: OpenAIToolDefinition = {
 const SENTENCE = 'I should check the configuration file again before answering. ';
 /** Far more than the detector needs, so a broken guard fails the test instead of hanging it. */
 const MAX_REPEATS = 400;
-const GUARD_OPTIONS: ToolLoopGuardOptions = { toolsOffered: true, nudgeAfter: 3, forceAnswerAfter: 5, canForceAnswer: true };
+const GUARD_OPTIONS: ToolLoopGuardOptions = { toolsOffered: true, nudgeAfter: 3, blockAfter: 5, canBlock: true };
+const LOOPING_QUERY = '**/package.json';
+const NEW_QUERY = '**/manifest.json';
 
 const TOKEN = {
   isCancellationRequested: false,
@@ -51,6 +53,17 @@ const TOKEN = {
 
 function sendDelta(res: ServerResponse, delta: Record<string, unknown>, finishReason: string | null = null): void {
   res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`);
+}
+
+function sendToolCall(res: ServerResponse, id: string, query: string): void {
+  const fn = { name: TOOL.function.name, arguments: JSON.stringify({ query }) };
+  sendDelta(res, { tool_calls: [{ index: 0, id, type: 'function', function: fn }] });
+  sendDelta(res, {}, 'tool_calls');
+}
+
+function lastToolResult(request: OpenAIChatCompletionRequest): string {
+  const toolResults = request.messages.filter((m) => m.role === 'tool');
+  return String(toolResults[toolResults.length - 1]?.content ?? '');
 }
 
 async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
@@ -67,13 +80,6 @@ async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
     }
     const request = JSON.parse(body) as OpenAIChatCompletionRequest;
     requests.push(request);
-    const hasTools = (request.tools?.length ?? 0) > 0;
-    const hasToolHistory = request.messages.some((m) => m.role === 'tool');
-    if (behavior === 'rejectToolHistoryWithoutTools' && hasToolHistory && !hasTools) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: 'tool_result blocks require tools to be defined' } }));
-      return;
-    }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 
     if (behavior === 'repeatText') {
@@ -93,19 +99,17 @@ async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
       return;
     }
 
-    // A text-only round arrives without tools, or with tool_choice 'none' on the fallback.
-    const forcedAnswer = !hasTools || request.tool_choice === 'none';
-    if (forcedAnswer && (behavior === 'repeatToolCall' || behavior === 'rejectToolHistoryWithoutTools')) {
-      sendDelta(res, { content: 'Done looping.' }, 'stop');
-    } else if (forcedAnswer && behavior === 'repeatToolCallAsText') {
-      // vLLM only runs its tool parser for a request with tools and tool_choice auto, so GLM/Qwen markup streams as content.
-      sendDelta(res, { content: 'Let me try a broader search approach.' });
-      sendDelta(res, { content: '<tool_' });
-      sendDelta(res, { content: `call>${TOOL.function.name}\n<arg_key>query</arg_key>\n<arg_value>**/package.json</arg_value>\n</tool_call>` }, 'stop');
+    const searchedElsewhere = request.messages.some(
+      (m) => m.role === 'assistant' && JSON.stringify(m.tool_calls ?? []).includes(NEW_QUERY)
+    );
+    const id = `call_${requests.length}`;
+    if (behavior === 'changeApproachWhenBlocked' && searchedElsewhere) {
+      sendDelta(res, { content: 'Found it in the manifest.' }, 'stop');
+    } else if (behavior === 'changeApproachWhenBlocked' && lastToolResult(request).includes('blocked')) {
+      sendDelta(res, { content: 'Searching elsewhere.' });
+      sendToolCall(res, id, NEW_QUERY);
     } else {
-      const fn = { name: TOOL.function.name, arguments: JSON.stringify({ query: '**/package.json' }) };
-      sendDelta(res, { tool_calls: [{ index: 0, id: `call_${requests.length}`, type: 'function', function: fn }] });
-      sendDelta(res, {}, 'tool_calls');
+      sendToolCall(res, id, LOOPING_QUERY);
     }
     res.end('data: [DONE]\n\n');
   });
@@ -131,7 +135,7 @@ function makeClient(url: string): GatewayClient {
 async function streamReply(
   client: GatewayClient,
   request: OpenAIChatCompletionRequest,
-  options: { detectRepetition?: boolean; dropToolCalls?: boolean }
+  options: Pick<Parameters<typeof streamResponse>[0], 'detectRepetition' | 'withholdToolCall'>
 ): Promise<StreamResult> {
   const texts: string[] = [];
   const toolCalls: StreamResult['toolCalls'] = [];
@@ -159,27 +163,13 @@ async function runAgentTurn(client: GatewayClient): Promise<Round[]> {
   ];
   const rounds: Round[] = [];
   while (rounds.length < 10) {
-    const { action, messages } = guardToolLoop(history, GUARD_OPTIONS);
-    // Same request wiring as ChatRequestHandler, which can't load outside VS Code:
-    // a forced answer goes out without tools, then with tools and tool_choice 'none' if the server rejects that.
-    const forceAnswer = action === 'forceAnswer';
-    const send = (withTools: boolean): Promise<StreamResult> =>
-      streamReply(
-        client,
-        withTools
-          ? { model: 'loop-sim', messages, tools: [TOOL], tool_choice: forceAnswer ? 'none' : 'auto' }
-          : { model: 'loop-sim', messages },
-        { dropToolCalls: forceAnswer }
-      );
-    let result: StreamResult;
-    try {
-      result = await send(!forceAnswer);
-    } catch (error) {
-      if (!forceAnswer || !isToolHistoryRejection(error)) {
-        throw error;
-      }
-      result = await send(true);
-    }
+    const { action, status, messages } = guardToolLoop(history, GUARD_OPTIONS);
+    // Same request wiring as ChatRequestHandler, which can't load outside VS Code.
+    const result = await streamReply(
+      client,
+      { model: 'loop-sim', messages, tools: [TOOL], tool_choice: 'auto' },
+      { withholdToolCall: action === 'block' ? isRepeatedToolCall(status) : undefined }
+    );
     rounds.push({ action, ...result });
     if (result.toolCalls.length === 0) {
       break;
@@ -201,67 +191,41 @@ async function runAgentTurn(client: GatewayClient): Promise<Round[]> {
 }
 
 function sentLoopNote(request: OpenAIChatCompletionRequest): boolean {
-  const toolResults = request.messages.filter((m) => m.role === 'tool');
-  return String(toolResults[toolResults.length - 1]?.content).includes('[Loop guard]');
+  return lastToolResult(request).includes('[Loop guard]');
 }
 
 describe('loop guard against a fake server', () => {
-  test('nudges, then forces a text-only answer without tools when the same tool call keeps repeating', async () => {
+  test('nudges, then blocks the repeated call and ends the turn when the model only repeats it', async () => {
     const server = await startServer('repeatToolCall');
     try {
       const rounds = await runAgentTurn(makeClient(server.url));
-      assert.deepEqual(rounds.map((r) => r.action), ['none', 'none', 'none', 'nudge', 'nudge', 'forceAnswer']);
-      assert.deepEqual(server.requests.map((r) => r.tools?.length ?? 0), [1, 1, 1, 1, 1, 0]);
-      assert.deepEqual(server.requests.map((r) => r.tool_choice), ['auto', 'auto', 'auto', 'auto', 'auto', undefined]);
+      assert.deepEqual(rounds.map((r) => r.action), ['none', 'none', 'none', 'nudge', 'nudge', 'block']);
+      // Tools stay in every request; the block happens on the reply, not in the request.
+      assert.deepEqual(server.requests.map((r) => r.tools?.length), [1, 1, 1, 1, 1, 1]);
+      assert.deepEqual(server.requests.map((r) => r.tool_choice), ['auto', 'auto', 'auto', 'auto', 'auto', 'auto']);
       assert.deepEqual(server.requests.map(sentLoopNote), [false, false, false, true, true, true]);
-      assert.deepEqual(rounds[rounds.length - 1].texts, ['Done looping.']);
-    } finally {
-      await server.close();
-    }
-  });
-
-  test('resends the text-only round with tools and tool_choice none when the server rejects tool history without them', async () => {
-    const server = await startServer('rejectToolHistoryWithoutTools');
-    try {
-      const rounds = await runAgentTurn(makeClient(server.url));
-      assert.equal(rounds.length, 6);
-      assert.equal(server.requests.length, 7);
-      const [rejected, fallback] = server.requests.slice(5);
-      assert.equal(rejected.tools, undefined);
-      assert.equal(fallback.tools?.length, 1);
-      assert.equal(fallback.tool_choice, 'none');
-      assert.ok(sentLoopNote(fallback));
-      assert.deepEqual(rounds[rounds.length - 1].texts, ['Done looping.']);
-    } finally {
-      await server.close();
-    }
-  });
-
-  test('withholds the tool call when the server ignores tool_choice none', async () => {
-    const server = await startServer('repeatToolCallIgnoringNone');
-    try {
-      const rounds = await runAgentTurn(makeClient(server.url));
+      assert.match(lastToolResult(server.requests[5]), /now blocked/);
       const last = rounds[rounds.length - 1];
-      assert.equal(rounds.length, 6);
-      assert.equal(last.stats.droppedToolCalls, 1);
-      assert.match(last.texts.join(''), /tried to call a tool again/);
-    } finally {
-      await server.close();
-    }
-  });
-
-  test('cuts a tool call the server returns as text on the text-only round', async () => {
-    const server = await startServer('repeatToolCallAsText');
-    try {
-      const rounds = await runAgentTurn(makeClient(server.url));
-      const last = rounds[rounds.length - 1];
-      assert.equal(rounds.length, 6);
-      assert.equal(last.action, 'forceAnswer');
-      assert.equal(last.stats.toolMarkupStopped, true);
       assert.equal(last.toolCalls.length, 0);
-      const shown = last.texts.join('');
-      assert.ok(shown.startsWith('Let me try a broader search approach.\n\n*(Loop guard:'), shown);
-      assert.equal(shown.includes('<tool_call>'), false, shown);
+      assert.equal(last.stats.droppedToolCalls, 1);
+      assert.match(last.texts.join(''), /made the blocked tool call again/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test('lets the agent carry on when it changes approach after the block', async () => {
+    const server = await startServer('changeApproachWhenBlocked');
+    try {
+      const rounds = await runAgentTurn(makeClient(server.url));
+      assert.deepEqual(rounds.map((r) => r.action), ['none', 'none', 'none', 'nudge', 'nudge', 'block', 'none']);
+      const blocked = rounds[5];
+      assert.deepEqual(blocked.toolCalls.map((c) => c.args.query), [NEW_QUERY]);
+      assert.equal(blocked.stats.droppedToolCalls, undefined);
+      assert.deepEqual(blocked.texts, ['Searching elsewhere.']);
+      // The new call reset the count, so the final request carries no loop note.
+      assert.equal(sentLoopNote(server.requests[6]), false);
+      assert.deepEqual(rounds[6].texts, ['Found it in the manifest.']);
     } finally {
       await server.close();
     }

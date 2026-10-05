@@ -83,6 +83,6 @@ export interface GatewayConfig {
   loopGuardRepetition: boolean;
   /** Warn the model after this many identical tool rounds (same call, same result); 0 = off. */
   loopGuardToolNudgeAfter: number;
-  /** Drop tools so the model must answer after this many identical tool rounds; 0 = off. */
-  loopGuardToolForceAnswerAfter: number;
+  /** Withhold a repeat of the looping call after this many identical tool rounds; 0 = off. */
+  loopGuardToolBlockAfter: number;
 }

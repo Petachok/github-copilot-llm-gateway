@@ -12,13 +12,24 @@ interface WireToolCall {
   function?: { name?: unknown; arguments?: unknown };
 }
 
+export interface RepeatedToolCall {
+  readonly name: string;
+  /** Raw JSON arguments as recorded in the history. */
+  readonly arguments: string;
+}
+
 export interface ToolLoopStatus {
   /** Consecutive trailing rounds identical to the latest one; 0 when it made no tool calls. */
   readonly count: number;
   readonly toolNames: readonly string[];
+  /** The calls of the latest round, i.e. the ones being repeated. */
+  readonly calls: readonly RepeatedToolCall[];
 }
 
-export type ToolLoopAction = 'none' | 'nudge' | 'forceAnswer';
+/** 'block' withholds a repeat of the looping call(s); anything else the model does still goes through. */
+export type ToolLoopAction = 'none' | 'nudge' | 'block';
+
+const NO_LOOP: ToolLoopStatus = { count: 0, toolNames: [], calls: [] };
 
 function callName(call: WireToolCall): string {
   return typeof call.function?.name === 'string' ? call.function.name : '';
@@ -50,13 +61,14 @@ function recordToolResult(msg: OpenAIMessage, results: Map<string, string>): voi
  */
 export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): ToolLoopStatus {
   if (messages[messages.length - 1]?.role === 'user') {
-    return { count: 0, toolNames: [] };
+    return NO_LOOP;
   }
 
   // Results are paired with the round they follow; some servers reuse call ids across rounds.
   let results = new Map<string, string>();
   let latest: string | undefined;
   let toolNames: string[] = [];
+  let repeated: RepeatedToolCall[] = [];
   let count = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -76,21 +88,22 @@ export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): Too
     if (latest === undefined) {
       latest = signature;
       toolNames = [...new Set(calls.map(callName))];
+      repeated = calls.map((call) => ({ name: callName(call), arguments: callArguments(call) }));
     } else if (signature !== latest) {
       break;
     }
     count++;
   }
-  return { count, toolNames };
+  return { count, toolNames, calls: repeated };
 }
 
 /** The count includes the current round, so a threshold below 2 would fire on every tool round. */
 const MIN_THRESHOLD = 2;
 
 /** A threshold below 2 (e.g. 0) disables that level. */
-export function resolveToolLoopAction(count: number, nudgeAfter: number, forceAnswerAfter: number): ToolLoopAction {
-  if (forceAnswerAfter >= MIN_THRESHOLD && count >= forceAnswerAfter) {
-    return 'forceAnswer';
+export function resolveToolLoopAction(count: number, nudgeAfter: number, blockAfter: number): ToolLoopAction {
+  if (blockAfter >= MIN_THRESHOLD && count >= blockAfter) {
+    return 'block';
   }
   if (nudgeAfter >= MIN_THRESHOLD && count >= nudgeAfter) {
     return 'nudge';
@@ -99,12 +112,12 @@ export function resolveToolLoopAction(count: number, nudgeAfter: number, forceAn
 }
 
 /** Model-facing note appended to the latest tool result. */
-export function buildToolLoopNote(status: ToolLoopStatus, forceAnswer: boolean): string {
+export function buildToolLoopNote(status: ToolLoopStatus, block: boolean): string {
   const seen =
     `[Loop guard] You have called ${status.toolNames.join(', ')} ${status.count} times in a row ` +
     'with identical arguments and received identical results.';
-  return forceAnswer
-    ? `${seen} Tools are disabled for this reply. Answer with what you know so far, explain what is blocking you, and ask the user how to proceed.`
+  return block
+    ? `${seen} That exact call is now blocked and will not run again. Use the result you already have, call a different tool or use different arguments, or answer the user.`
     : `${seen} Repeating the call will not produce new information. Use the result you already have, try a different approach, or answer the user.`;
 }
 
@@ -124,17 +137,52 @@ export function appendToolLoopNudge(messages: readonly OpenAIMessage[], note: st
   return copy;
 }
 
+/** JSON with object keys sorted at every level, so argument order does not matter. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort((a, b) => a.localeCompare(b))
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function toolCallKey(name: string, args: unknown): string {
+  return `${name}\u0000${canonicalJson(args)}`;
+}
+
+function parseArguments(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+export type ToolCallFilter = (name: string, args: Record<string, unknown>) => boolean;
+
+/** True for a repeat of one of the looping calls (same tool, same arguments); any other call passes. */
+export function isRepeatedToolCall(status: ToolLoopStatus): ToolCallFilter {
+  const blocked = new Set(status.calls.map((call) => toolCallKey(call.name, parseArguments(call.arguments))));
+  return (name, args) => blocked.has(toolCallKey(name, args));
+}
+
 export interface ToolLoopGuardOptions {
   /** False for utility requests (titles, summaries) that replay agent history without offering tools. */
   readonly toolsOffered: boolean;
   readonly nudgeAfter: number;
-  readonly forceAnswerAfter: number;
+  readonly blockAfter: number;
   /** False when the caller requires a tool call, which caps the guard at a nudge. */
-  readonly canForceAnswer: boolean;
+  readonly canBlock: boolean;
 }
 
 export interface ToolLoopGuard {
-  /** 'forceAnswer' means the request must go out text-only (no tools, or tools with `tool_choice: 'none'`) and withhold any tool call. */
+  /** 'block' means a repeat of `status.calls` in the reply must be withheld (see `isRepeatedToolCall`). */
   readonly action: ToolLoopAction;
   readonly status: ToolLoopStatus;
   /** The request history, with the loop note appended once the guard fires. */
@@ -144,26 +192,14 @@ export interface ToolLoopGuard {
 /** Pick the guard action for one request and append the matching note to its history. */
 export function guardToolLoop(messages: OpenAIMessage[], options: ToolLoopGuardOptions): ToolLoopGuard {
   if (!options.toolsOffered) {
-    return { action: 'none', status: { count: 0, toolNames: [] }, messages };
+    return { action: 'none', status: NO_LOOP, messages };
   }
   const status = countRepeatedToolRounds(messages);
-  const resolved = resolveToolLoopAction(status.count, options.nudgeAfter, options.forceAnswerAfter);
-  const action = resolved === 'forceAnswer' && !options.canForceAnswer ? 'nudge' : resolved;
+  const resolved = resolveToolLoopAction(status.count, options.nudgeAfter, options.blockAfter);
+  const action = resolved === 'block' && !options.canBlock ? 'nudge' : resolved;
   if (action === 'none') {
     return { action, status, messages };
   }
-  const note = buildToolLoopNote(status, action === 'forceAnswer');
+  const note = buildToolLoopNote(status, action === 'block');
   return { action, status, messages: appendToolLoopNudge(messages, note) };
-}
-
-/**
- * A request-validation failure on a forced text-only round that left the
- * tools out: some backends (Anthropic through a proxy, some chat templates)
- * reject tool history without tool definitions, so the round must be resent
- * with the tools and `tool_choice: 'none'`.
- */
-export function isToolHistoryRejection(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  // The client wraps the HTTP failure: 'Chat completion request failed: Chat completion failed: 400 ...'.
-  return /\bChat completion failed: (400|422)\b/.test(message);
 }
