@@ -410,12 +410,23 @@ export class GatewayClient {
    */
   private createStreamTimers(cancellationToken: vscode.CancellationToken): StreamTimers {
     const controller = new AbortController();
-    const cancelSub = cancellationToken.onCancellationRequested(() => controller.abort());
-    const headerTimeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
+    const timeoutMs = this.config.requestTimeout;
+    // The reason becomes the rejection of fetch()/reader.read(), replacing the
+    // bare "This operation was aborted" that hides which limit was hit.
+    const abortWith = (why: string): void => controller.abort(new Error(why));
+    const timeoutHint = `${timeoutMs} ms (github.copilot.llm-gateway.requestTimeout)`;
+    const cancelSub = cancellationToken.onCancellationRequested(() => abortWith('Request cancelled'));
+    const headerTimeoutId = setTimeout(
+      () => abortWith(`The server did not start responding within ${timeoutHint}`),
+      timeoutMs
+    );
     let inactivityTimeoutId: ReturnType<typeof setTimeout> | undefined;
     const resetInactivity = (): void => {
       if (inactivityTimeoutId) { clearTimeout(inactivityTimeoutId); }
-      inactivityTimeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout);
+      inactivityTimeoutId = setTimeout(
+        () => abortWith(`The server sent no data for ${timeoutHint}`),
+        timeoutMs
+      );
     };
     return {
       controller,

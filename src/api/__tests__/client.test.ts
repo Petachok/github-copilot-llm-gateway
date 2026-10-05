@@ -358,6 +358,29 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test('names the timeout that fired instead of a bare "operation was aborted"', async () => {
+    const originalFetch = globalThis.fetch;
+    // A real abort rejects with `signal.reason`; mirror that so the test
+    // exercises the message the user actually sees.
+    globalThis.fetch = (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+      });
+    try {
+      const client = new GatewayClient({ ...streamTestConfig, requestTimeout: 20 });
+      await assert.rejects(
+        async () => {
+          for await (const _chunk of client.streamChatCompletion({ model: 'm', messages: [] }, streamTestToken)) {
+            // unreachable
+          }
+        },
+        /did not start responding within 20 ms \(github\.copilot\.llm-gateway\.requestTimeout\)/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe('streamChatCompletion extraHeaders (session affinity)', () => {
