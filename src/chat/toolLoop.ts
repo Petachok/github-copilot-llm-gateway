@@ -1,7 +1,8 @@
 /**
  * Detects an agent tool-call loop across rounds: the model making the same
  * tool call(s) with identical arguments and getting identical results round
- * after round. Stateless — every round's request carries the full history.
+ * after round, or cycling through a short sequence of such rounds (A, B, A,
+ * B, ...). Stateless — every round's request carries the full history.
  * Pure (no `vscode` import).
  */
 
@@ -19,17 +20,23 @@ export interface RepeatedToolCall {
 }
 
 export interface ToolLoopStatus {
-  /** Consecutive trailing rounds identical to the latest one; 0 when it made no tool calls. */
+  /** Trailing rounds that repeat the cycle, including the first pass; 1 when nothing repeats; 0 without tool calls. */
   readonly count: number;
+  /** Rounds per cycle: 1 for the same round over and over, 2 for A, B, A, B, ... */
+  readonly period: number;
+  /** Tools in one cycle, in call order. */
   readonly toolNames: readonly string[];
-  /** The calls of the latest round, i.e. the ones being repeated. */
+  /** The calls of one cycle, i.e. the ones being repeated. */
   readonly calls: readonly RepeatedToolCall[];
 }
 
 /** 'block' withholds a repeat of the looping call(s); anything else the model does still goes through. */
 export type ToolLoopAction = 'none' | 'nudge' | 'block';
 
-const NO_LOOP: ToolLoopStatus = { count: 0, toolNames: [], calls: [] };
+const NO_LOOP: ToolLoopStatus = { count: 0, period: 0, toolNames: [], calls: [] };
+
+/** Longest cycle looked for. Longer ones are rare, and the cost grows with the history. */
+const MAX_PERIOD = 4;
 
 function callName(call: WireToolCall): string {
   return typeof call.function?.name === 'string' ? call.function.name : '';
@@ -53,23 +60,20 @@ function recordToolResult(msg: OpenAIMessage, results: Map<string, string>): voi
   }
 }
 
-/**
- * Walk back from the latest round, skipping user messages between rounds,
- * until an assistant message differs from it or carries no tool calls (the
- * end of an earlier turn). A request ending in a user message is a fresh
- * prompt, not a continuation, so it never counts.
- */
-export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): ToolLoopStatus {
-  if (messages[messages.length - 1]?.role === 'user') {
-    return NO_LOOP;
-  }
+interface ToolRound {
+  readonly signature: string;
+  readonly calls: readonly WireToolCall[];
+}
 
+/**
+ * The tool rounds of the current turn, latest first. Walks back from the end,
+ * skipping user messages between rounds, until an assistant message carries
+ * no tool calls (the end of an earlier turn).
+ */
+function collectToolRounds(messages: readonly OpenAIMessage[]): ToolRound[] {
+  const rounds: ToolRound[] = [];
   // Results are paired with the round they follow; some servers reuse call ids across rounds.
   let results = new Map<string, string>();
-  let latest: string | undefined;
-  let toolNames: string[] = [];
-  let repeated: RepeatedToolCall[] = [];
-  let count = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === 'tool') {
@@ -83,18 +87,56 @@ export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): Too
     if (calls.length === 0) {
       break;
     }
-    const signature = roundSignature(calls, results);
+    rounds.push({ signature: roundSignature(calls, results), calls });
     results = new Map();
-    if (latest === undefined) {
-      latest = signature;
-      toolNames = [...new Set(calls.map(callName))];
-      repeated = calls.map((call) => ({ name: callName(call), arguments: callArguments(call) }));
-    } else if (signature !== latest) {
-      break;
-    }
-    count++;
   }
-  return { count, toolNames, calls: repeated };
+  return rounds;
+}
+
+/**
+ * The shortest period (up to MAX_PERIOD) the trailing rounds repeat with, and
+ * how many rounds that stretch covers. A cycle has to come round at least
+ * twice; one earlier occurrence of a round is not a loop.
+ */
+function findCycle(rounds: readonly ToolRound[]): { period: number; length: number } | undefined {
+  for (let period = 1; period <= MAX_PERIOD && 2 * period <= rounds.length; period++) {
+    let matched = 0;
+    while (matched + period < rounds.length && rounds[matched].signature === rounds[matched + period].signature) {
+      matched++;
+    }
+    if (matched >= period) {
+      return { period, length: matched + period };
+    }
+  }
+  return undefined;
+}
+
+/** A request ending in a user message is a fresh prompt, not a continuation, so it never counts. */
+export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): ToolLoopStatus {
+  if (messages[messages.length - 1]?.role === 'user') {
+    return NO_LOOP;
+  }
+  const rounds = collectToolRounds(messages);
+  if (rounds.length === 0) {
+    return NO_LOOP;
+  }
+  const cycle = findCycle(rounds) ?? { period: 1, length: 1 };
+  // Oldest round of the cycle first, so the notes read in call order.
+  const cycleCalls = rounds.slice(0, cycle.period).reverse().flatMap((round) => round.calls);
+  return {
+    count: cycle.length,
+    period: cycle.period,
+    toolNames: [...new Set(cycleCalls.map(callName))],
+    calls: cycleCalls.map((call) => ({ name: callName(call), arguments: callArguments(call) })),
+  };
+}
+
+/** How the loop looks, e.g. "called read_file 5 times in a row" or "repeated the same sequence of tool calls (a, b) for 6 rounds". */
+export function describeToolLoop(status: ToolLoopStatus, formatName: (name: string) => string = (name) => name): string {
+  const names = status.toolNames.map(formatName).join(', ');
+  return status.period > 1
+    ? `repeated the same sequence of tool calls (${names}) for ${status.count} rounds`
+    : `called ${names} ${status.count} times in a row`;
 }
 
 /** The count includes the current round, so a threshold below 2 would fire on every tool round. */
@@ -113,12 +155,11 @@ export function resolveToolLoopAction(count: number, nudgeAfter: number, blockAf
 
 /** Model-facing note appended to the latest tool result. */
 export function buildToolLoopNote(status: ToolLoopStatus, block: boolean): string {
-  const seen =
-    `[Loop guard] You have called ${status.toolNames.join(', ')} ${status.count} times in a row ` +
-    'with identical arguments and received identical results.';
+  const seen = `[Loop guard] You have ${describeToolLoop(status)} with identical arguments and received identical results.`;
+  const plural = status.calls.length > 1;
   return block
-    ? `${seen} That exact call is now blocked and will not run again. Use the result you already have, call a different tool or use different arguments, or answer the user.`
-    : `${seen} Repeating the call will not produce new information. Use the result you already have, try a different approach, or answer the user.`;
+    ? `${seen} ${plural ? 'Those exact calls are' : 'That exact call is'} now blocked and will not run again. Use the results you already have, call a different tool or use different arguments, or answer the user.`
+    : `${seen} Repeating ${plural ? 'them' : 'the call'} will not produce new information. Use the results you already have, try a different approach, or answer the user.`;
 }
 
 /**

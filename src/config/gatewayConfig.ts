@@ -81,8 +81,10 @@ export interface GatewayConfig {
   usageCriticalPercent: number;
   /** Stop a streamed response once it degenerates into an exact repeating cycle. */
   loopGuardRepetition: boolean;
-  /** Warn the model after this many identical tool rounds (same call, same result); 0 = off. */
+  /** Master switch for the tool-call loop guard (nudge and block). */
+  loopGuardToolCalls: boolean;
+  /** Warn the model after this many tool rounds repeating the same call or short cycle (same arguments, same results); 0 = off. */
   loopGuardToolNudgeAfter: number;
-  /** Withhold a repeat of the looping call after this many identical tool rounds; 0 = off. */
+  /** Withhold a repeat of the looping call(s) after this many such rounds; 0 = off. */
   loopGuardToolBlockAfter: number;
 }

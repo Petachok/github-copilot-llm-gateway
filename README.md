@@ -351,15 +351,16 @@ These settings control how the extension handles agentic features like code edit
 Small and quantized models sometimes get stuck. The loop guard catches two cases:
 
 - **Repeating output**: the model writes the same sentence or paragraph over and over, in its answer or its thinking. The gateway stops the response, closes the request so the server stops generating, and adds a short note. Ask the model to continue or rephrase.
-- **Tool-call loops**: in agent mode, the model keeps making the same tool call with the same arguments and gets the same result each time. The gateway first adds a warning to the tool result telling the model to change approach. If the loop continues, it blocks that exact call: the model is told the call will not run again, a note is shown in the chat, and a repeat of it is withheld. Every other tool call (a different tool, or the same tool with different arguments) still goes through, so the agent can take a new direction and keep working. Only if the model does nothing but repeat the blocked call does the reply end, with a note; send a follow-up with a hint to continue. Only identical results count: polling a build that keeps printing output is not affected, but polling one that prints nothing new is.
+- **Tool-call loops**: in agent mode, the model keeps making the same tool call with the same arguments and gets the same result each time, or cycles through a short sequence of such calls (A, B, A, B, …; up to four calls long). The gateway first adds a warning to the tool result telling the model to change approach. If the loop continues, it blocks those exact calls: the model is told they will not run again, a note is shown in the chat, and a repeat of one of them is withheld. Every other tool call (a different tool, or the same tool with different arguments) still goes through, so the agent can take a new direction and keep working. Only if the model does nothing but repeat a blocked call does the reply end, with a note; send a follow-up with a hint to continue. Only identical results count: polling a build that keeps printing output is not affected, but polling one that prints nothing new is.
 
 | Setting                         | Default | Description                                                                                                  |
 | ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------ |
 | **Loop Guard Repetition**       | `true`  | Stop a response that keeps repeating itself.                                                                 |
-| **Loop Guard Tool Nudge After** | `3`     | Warn the model after this many identical tool calls in a row (same arguments, same result). `0` turns it off. |
-| **Loop Guard Tool Block After** | `5`     | Block the repeated call after this many identical tool calls in a row; other calls still run. `0` turns it off. |
+| **Loop Guard Tool Calls**       | `true`  | Catch tool-call loops (the nudge and the block below). Turn off to disable both.                            |
+| **Loop Guard Tool Nudge After** | `3`     | Warn the model after this many tool rounds repeating the same call or short cycle (same arguments, same results). `0` turns it off. |
+| **Loop Guard Tool Block After** | `5`     | Block the repeated call(s) after this many such rounds; other calls still run. `0` turns it off.             |
 
-> **Note**: A request to repeat something many times on purpose is also cut off. Turn off **Loop Guard Repetition** if you need that. To turn off the tool-call guard entirely, set both **Nudge After** and **Block After** to `0`.
+> **Note**: A request to repeat something many times on purpose is also cut off. Turn off **Loop Guard Repetition** if you need that. Turning off both **Loop Guard Repetition** and **Loop Guard Tool Calls** disables the loop guard entirely.
 
 ### Diagnostic Settings
 

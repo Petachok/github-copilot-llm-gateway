@@ -16,7 +16,7 @@ import {
 } from '../chat/tokenBudget';
 import { tryRepairJson } from '../chat/jsonRepair';
 import { fillMissingRequiredProperties } from '../chat/toolSchema';
-import { ToolCallFilter, guardToolLoop, isRepeatedToolCall } from '../chat/toolLoop';
+import { ToolCallFilter, describeToolLoop, guardToolLoop, isRepeatedToolCall } from '../chat/toolLoop';
 import {
   StreamChunk,
   StreamReporter,
@@ -418,6 +418,9 @@ export class ChatRequestHandler {
     options: vscode.ProvideLanguageModelChatResponseOptions,
     progress: vscode.Progress<vscode.LanguageModelResponsePart>
   ): { messages: OpenAIMessage[]; withholdToolCall?: ToolCallFilter } {
+    if (!config.loopGuardToolCalls) {
+      return { messages: openAIMessages };
+    }
     const { action, status, messages } = guardToolLoop(openAIMessages, {
       toolsOffered: config.enableToolCalling && !!options.tools?.length,
       nudgeAfter: config.loopGuardToolNudgeAfter,
@@ -428,18 +431,19 @@ export class ChatRequestHandler {
       return { messages };
     }
 
-    const names = status.toolNames.join(', ').replaceAll('`', '');
+    const those = status.calls.length > 1 ? 'those calls' : 'that call';
     this.deps.log(
-      `Loop guard: ${names} repeated ${status.count}x with identical arguments and results; ${
-        action === 'block' ? 'blocking a repeat of that call' : 'nudging the model'
+      `Loop guard: the model ${describeToolLoop(status)} with identical arguments and results; ${
+        action === 'block' ? `blocking a repeat of ${those}` : 'nudging the model'
       }`
     );
     if (action !== 'block') {
       return { messages };
     }
+    const described = describeToolLoop(status, (name) => `\`${name.replaceAll('`', '')}\``);
     progress.report(
       new vscode.LanguageModelTextPart(
-        `*(Loop guard: the model called \`${names}\` ${status.count} times in a row with identical results, so repeating that call is blocked.)*\n\n`
+        `*(Loop guard: the model ${described} with identical results, so repeating ${those} is blocked.)*\n\n`
       )
     );
     return { messages, withholdToolCall: isRepeatedToolCall(status) };

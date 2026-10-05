@@ -12,10 +12,11 @@ import { ToolLoopAction, ToolLoopGuardOptions, guardToolLoop, isRepeatedToolCall
 
 /**
  * `repeatToolCall`: the model never changes its mind.
+ * `alternateToolCalls`: the model bounces between two calls (A, B, A, B, ...), each with a different narration.
  * `changeApproachWhenBlocked`: once told its call is blocked, it searches for something else, then answers.
  * `repeatText`: a reply that loops on one sentence.
  */
-type ServerBehavior = 'repeatToolCall' | 'changeApproachWhenBlocked' | 'repeatText';
+type ServerBehavior = 'repeatToolCall' | 'alternateToolCalls' | 'changeApproachWhenBlocked' | 'repeatText';
 
 interface FakeServer {
   readonly url: string;
@@ -102,13 +103,20 @@ async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
     const searchedElsewhere = request.messages.some(
       (m) => m.role === 'assistant' && JSON.stringify(m.tool_calls ?? []).includes(NEW_QUERY)
     );
+    const toolRounds = request.messages.filter((m) => m.role === 'assistant' && Array.isArray(m.tool_calls)).length;
     const id = `call_${requests.length}`;
     if (behavior === 'changeApproachWhenBlocked' && searchedElsewhere) {
       sendDelta(res, { content: 'Found it in the manifest.' }, 'stop');
     } else if (behavior === 'changeApproachWhenBlocked' && lastToolResult(request).includes('blocked')) {
       sendDelta(res, { content: 'Searching elsewhere.' });
       sendToolCall(res, id, NEW_QUERY);
+    } else if (behavior === 'alternateToolCalls' && toolRounds % 2 === 1) {
+      sendDelta(res, { content: 'Checking the manifest instead.' });
+      sendToolCall(res, id, NEW_QUERY);
     } else {
+      if (behavior === 'alternateToolCalls') {
+        sendDelta(res, { content: 'Looking for the package file.' });
+      }
       sendToolCall(res, id, LOOPING_QUERY);
     }
     res.end('data: [DONE]\n\n');
@@ -208,6 +216,23 @@ describe('loop guard against a fake server', () => {
       const last = rounds[rounds.length - 1];
       assert.equal(last.toolCalls.length, 0);
       assert.equal(last.stats.droppedToolCalls, 1);
+      assert.match(last.texts.join(''), /made the blocked tool call again/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test('catches a model bouncing between two calls and blocks both', async () => {
+    const server = await startServer('alternateToolCalls');
+    try {
+      const rounds = await runAgentTurn(makeClient(server.url));
+      // A, B, A, B is the first point the cycle has come round twice (4 rounds >= nudge at 3); one more round reaches the block.
+      assert.deepEqual(rounds.map((r) => r.action), ['none', 'none', 'none', 'none', 'nudge', 'block']);
+      assert.match(lastToolResult(server.requests[4]), /repeated the same sequence of tool calls \(file_search\) for 4 rounds/);
+      const last = rounds[rounds.length - 1];
+      assert.equal(last.toolCalls.length, 0);
+      assert.equal(last.stats.droppedToolCalls, 1);
+      assert.deepEqual(last.texts.slice(0, 1), ['Checking the manifest instead.']);
       assert.match(last.texts.join(''), /made the blocked tool call again/);
     } finally {
       await server.close();

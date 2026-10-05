@@ -38,6 +38,7 @@ describe('countRepeatedToolRounds', () => {
     ];
     assert.deepEqual(countRepeatedToolRounds(messages), {
       count: 3,
+      period: 1,
       toolNames: ['read_file'],
       calls: [{ name: 'read_file', arguments: JSON.stringify(READ_ARGS) }],
     });
@@ -119,6 +120,74 @@ describe('countRepeatedToolRounds', () => {
     assert.equal(countRepeatedToolRounds([]).count, 0);
   });
 
+  describe('cycles', () => {
+    const A = (id: string): OpenAIMessage[] => round(id, 'read_file', READ_ARGS, 'file body');
+    const B = (id: string): OpenAIMessage[] => round(id, 'grep_search', { query: 'plan' }, 'no matches');
+    const C = (id: string): OpenAIMessage[] => round(id, 'list_dir', { path: '/repo' }, 'src/');
+
+    test('detects two rounds alternating, counting every round of the stretch', () => {
+      const status = countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...A('3'), ...B('4')]);
+      assert.equal(status.period, 2);
+      assert.equal(status.count, 4);
+      assert.deepEqual(status.toolNames, ['read_file', 'grep_search']);
+      assert.deepEqual(status.calls.map((c) => c.name), ['read_file', 'grep_search']);
+    });
+
+    test('keeps counting through a partial repetition', () => {
+      const status = countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...A('3'), ...B('4'), ...A('5')]);
+      assert.equal(status.period, 2);
+      assert.equal(status.count, 5);
+      // Call order within the cycle follows the history: B then the latest A.
+      assert.deepEqual(status.toolNames, ['grep_search', 'read_file']);
+    });
+
+    test('needs the cycle to come round twice', () => {
+      assert.equal(countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...A('3')]).count, 1);
+      assert.equal(countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...C('3')]).count, 1);
+    });
+
+    test('a changed result inside the cycle breaks it', () => {
+      const changed = round('3', 'read_file', READ_ARGS, 'file body (edited)');
+      assert.equal(countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...changed, ...B('4')]).count, 1);
+    });
+
+    test('finds three-round cycles and prefers the shortest period', () => {
+      const three = countRepeatedToolRounds([...PROMPT, ...A('1'), ...B('2'), ...C('3'), ...A('4'), ...B('5'), ...C('6')]);
+      assert.equal(three.period, 3);
+      assert.equal(three.count, 6);
+      const same = countRepeatedToolRounds([...PROMPT, ...A('1'), ...A('2'), ...A('3'), ...A('4')]);
+      assert.equal(same.period, 1);
+      assert.equal(same.count, 4);
+    });
+
+    test('finds four-round cycles, including a partial pass, and blocks all four calls', () => {
+      const D = (id: string): OpenAIMessage[] => round(id, 'file_search', { query: '*.md' }, 'plan.md');
+      const four = [...A('1'), ...B('2'), ...C('3'), ...D('4')];
+      const status = countRepeatedToolRounds([...PROMPT, ...four, ...four, ...A('9')]);
+      assert.equal(status.period, 4);
+      assert.equal(status.count, 9);
+      assert.deepEqual(status.toolNames, ['grep_search', 'list_dir', 'file_search', 'read_file']);
+      const blocked = isRepeatedToolCall(status);
+      assert.equal(blocked('list_dir', { path: '/repo' }), true);
+      assert.equal(blocked('file_search', { query: '*.md' }), true);
+      assert.equal(blocked('file_search', { query: '*.ts' }), false);
+    });
+
+    test('a round that recurs inside a longer cycle still gives the longer period', () => {
+      const status = countRepeatedToolRounds([...PROMPT, ...A('1'), ...A('2'), ...B('3'), ...A('4'), ...A('5'), ...B('6')]);
+      assert.equal(status.period, 3);
+      assert.equal(status.count, 6);
+    });
+
+    test('ignores cycles longer than four rounds', () => {
+      const D = (id: string): OpenAIMessage[] => round(id, 'file_search', { query: '*.md' }, 'plan.md');
+      const E = (id: string): OpenAIMessage[] => round(id, 'get_errors', {}, 'none');
+      const five = [...A('1'), ...B('2'), ...C('3'), ...D('4'), ...E('5')];
+      const status = countRepeatedToolRounds([...PROMPT, ...five, ...five]);
+      assert.equal(status.count, 1);
+    });
+  });
+
   test('returns 0 for a fresh user prompt after an unfinished looping turn', () => {
     const messages = [
       ...PROMPT,
@@ -176,19 +245,29 @@ describe('appendToolLoopNudge', () => {
 });
 
 describe('buildToolLoopNote', () => {
-  const status = { count: 3, toolNames: ['read_file'], calls: [] };
+  const status = { count: 3, period: 1, toolNames: ['read_file'], calls: [{ name: 'read_file', arguments: '{}' }] };
 
   test('names the repeated tools and the count', () => {
     const note = buildToolLoopNote(status, false);
-    assert.match(note, /read_file/);
-    assert.match(note, /3 times/);
+    assert.match(note, /called read_file 3 times in a row/);
     assert.doesNotMatch(note, /blocked/);
   });
 
   test('tells the model the call is blocked, not that tools are gone', () => {
     const note = buildToolLoopNote({ ...status, count: 5 }, true);
-    assert.match(note, /blocked/);
+    assert.match(note, /That exact call is now blocked/);
     assert.match(note, /different tool or use different arguments/);
+  });
+
+  test('describes a cycle as a repeated sequence and blocks all of its calls', () => {
+    const cycle = {
+      count: 6,
+      period: 2,
+      toolNames: ['read_file', 'grep_search'],
+      calls: [{ name: 'read_file', arguments: '{}' }, { name: 'grep_search', arguments: '{}' }],
+    };
+    assert.match(buildToolLoopNote(cycle, false), /repeated the same sequence of tool calls \(read_file, grep_search\) for 6 rounds/);
+    assert.match(buildToolLoopNote(cycle, true), /Those exact calls are now blocked/);
   });
 });
 
@@ -209,6 +288,20 @@ describe('isRepeatedToolCall', () => {
     assert.equal(blocked('grep_search', { query: 'a' }), false);
     assert.equal(blocked('read_file', { ...READ_ARGS, endLine: 100 }), false);
     assert.equal(blocked('read_file', { filePath: '/repo/src/b.ts' }), false);
+  });
+
+  test('blocks every call of an alternating cycle, not just the latest', () => {
+    const alternating = countRepeatedToolRounds([
+      ...PROMPT,
+      ...round('1', 'read_file', READ_ARGS, 'file body'),
+      ...round('2', 'grep_search', { query: 'plan' }, 'no matches'),
+      ...round('3', 'read_file', READ_ARGS, 'file body'),
+      ...round('4', 'grep_search', { query: 'plan' }, 'no matches'),
+    ]);
+    const blockedInCycle = isRepeatedToolCall(alternating);
+    assert.equal(blockedInCycle('read_file', READ_ARGS), true);
+    assert.equal(blockedInCycle('grep_search', { query: 'plan' }), true);
+    assert.equal(blockedInCycle('grep_search', { query: 'tests' }), false);
   });
 });
 
@@ -239,5 +332,21 @@ describe('guardToolLoop', () => {
     const guard = guardToolLoop(looping, { ...options, canBlock: false });
     assert.equal(guard.action, 'nudge');
     assert.match(lastContent(guard.messages), /will not produce new information/);
+  });
+
+  test('with default thresholds a three-round cycle is blocked as soon as it is detected', () => {
+    const defaults = { toolsOffered: true, nudgeAfter: 3, blockAfter: 5, canBlock: true };
+    const abc = (ids: [string, string, string]): OpenAIMessage[] => [
+      ...round(ids[0], 'read_file', READ_ARGS, 'file body'),
+      ...round(ids[1], 'grep_search', { query: 'plan' }, 'no matches'),
+      ...round(ids[2], 'list_dir', { path: '/repo' }, 'src/'),
+    ];
+    // Five rounds hold only one full pass, so nothing fires yet.
+    const onePass = guardToolLoop([...PROMPT, ...abc(['1', '2', '3']), ...abc(['4', '5', '6']).slice(0, 4)], defaults);
+    assert.equal(onePass.action, 'none');
+    // The sixth round completes the second pass: six rounds without new information is past the block threshold.
+    const twoPasses = guardToolLoop([...PROMPT, ...abc(['1', '2', '3']), ...abc(['4', '5', '6'])], defaults);
+    assert.equal(twoPasses.action, 'block');
+    assert.match(lastContent(twoPasses.messages), /sequence of tool calls \(read_file, grep_search, list_dir\) for 6 rounds/);
   });
 });

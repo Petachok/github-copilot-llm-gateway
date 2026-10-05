@@ -42,6 +42,7 @@ const streamTestConfig = {
   thinkingEffortParameter: 'reasoning_effort',
   thinkingEffortPicker: 'auto',
   loopGuardRepetition: true,
+  loopGuardToolCalls: true,
   loopGuardToolNudgeAfter: 3,
   loopGuardToolBlockAfter: 5,
 } as unknown as import('../../config/gatewayConfig').GatewayConfig;
