@@ -57,6 +57,15 @@ describe('countRepeatedToolRounds', () => {
     assert.equal(countRepeatedToolRounds(messages).count, 1);
   });
 
+  test('compares arguments sent as objects by value', () => {
+    const objectRound = (id: string, filePath: string): OpenAIMessage[] => [
+      { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'read_file', arguments: { filePath } } }] },
+      { role: 'tool', tool_call_id: id, content: 'same' },
+    ];
+    const messages = [...PROMPT, ...objectRound('c1', 'a.ts'), ...objectRound('c2', 'b.ts'), ...objectRound('c3', 'b.ts')];
+    assert.equal(countRepeatedToolRounds(messages).count, 2);
+  });
+
   test('stops at a plain assistant answer from an earlier turn', () => {
     const messages = [
       ...PROMPT,

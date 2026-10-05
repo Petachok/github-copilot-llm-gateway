@@ -24,11 +24,22 @@ function callName(call: WireToolCall): string {
   return typeof call.function?.name === 'string' ? call.function.name : '';
 }
 
+function callArguments(call: WireToolCall): string {
+  const args = call.function?.arguments;
+  return typeof args === 'string' ? args : JSON.stringify(args ?? null);
+}
+
 function roundSignature(calls: readonly WireToolCall[], results: ReadonlyMap<string, string>): string {
   return calls
-    .map((call) => [callName(call), String(call.function?.arguments ?? ''), results.get(String(call.id)) ?? ''].join('\u0000'))
-    .sort()
+    .map((call) => [callName(call), callArguments(call), results.get(String(call.id)) ?? ''].join('\u0000'))
+    .sort((a, b) => a.localeCompare(b))
     .join('\u0001');
+}
+
+function recordToolResult(msg: OpenAIMessage, results: Map<string, string>): void {
+  if (typeof msg.tool_call_id === 'string' && typeof msg.content === 'string') {
+    results.set(msg.tool_call_id, msg.content);
+  }
 }
 
 /**
@@ -50,9 +61,7 @@ export function countRepeatedToolRounds(messages: readonly OpenAIMessage[]): Too
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === 'tool') {
-      if (typeof msg.tool_call_id === 'string' && typeof msg.content === 'string') {
-        results.set(msg.tool_call_id, msg.content);
-      }
+      recordToolResult(msg, results);
       continue;
     }
     if (msg.role !== 'assistant') {
