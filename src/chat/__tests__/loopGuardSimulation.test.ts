@@ -6,11 +6,16 @@ import { GatewayClient } from '../../api/client';
 import { OpenAIChatCompletionRequest, OpenAIMessage, OpenAIToolDefinition } from '../../api/types';
 import { GatewayConfig } from '../../config/gatewayConfig';
 import { StreamChunk, StreamStats, streamResponse } from '../responseStreamer';
-import { ToolLoopAction, ToolLoopGuardOptions, guardToolLoop } from '../toolLoop';
+import { ToolLoopAction, ToolLoopGuardOptions, guardToolLoop, isToolHistoryRejection } from '../toolLoop';
 
 // Simulates both loop guards end to end: a local fake OpenAI server, the real HTTP client and the stream parser.
 
-type ServerBehavior = 'repeatToolCall' | 'repeatToolCallIgnoringNone' | 'repeatText';
+type ServerBehavior =
+  | 'repeatToolCall'
+  | 'repeatToolCallIgnoringNone'
+  | 'repeatToolCallAsText'
+  | 'rejectToolHistoryWithoutTools'
+  | 'repeatText';
 
 interface FakeServer {
   readonly url: string;
@@ -62,6 +67,13 @@ async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
     }
     const request = JSON.parse(body) as OpenAIChatCompletionRequest;
     requests.push(request);
+    const hasTools = (request.tools?.length ?? 0) > 0;
+    const hasToolHistory = request.messages.some((m) => m.role === 'tool');
+    if (behavior === 'rejectToolHistoryWithoutTools' && hasToolHistory && !hasTools) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'tool_result blocks require tools to be defined' } }));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
 
     if (behavior === 'repeatText') {
@@ -81,8 +93,15 @@ async function startServer(behavior: ServerBehavior): Promise<FakeServer> {
       return;
     }
 
-    if (request.tool_choice === 'none' && behavior === 'repeatToolCall') {
+    // A text-only round arrives without tools, or with tool_choice 'none' on the fallback.
+    const forcedAnswer = !hasTools || request.tool_choice === 'none';
+    if (forcedAnswer && (behavior === 'repeatToolCall' || behavior === 'rejectToolHistoryWithoutTools')) {
       sendDelta(res, { content: 'Done looping.' }, 'stop');
+    } else if (forcedAnswer && behavior === 'repeatToolCallAsText') {
+      // vLLM only runs its tool parser for a request with tools and tool_choice auto, so GLM/Qwen markup streams as content.
+      sendDelta(res, { content: 'Let me try a broader search approach.' });
+      sendDelta(res, { content: '<tool_' });
+      sendDelta(res, { content: `call>${TOOL.function.name}\n<arg_key>query</arg_key>\n<arg_value>**/package.json</arg_value>\n</tool_call>` }, 'stop');
     } else {
       const fn = { name: TOOL.function.name, arguments: JSON.stringify({ query: '**/package.json' }) };
       sendDelta(res, { tool_calls: [{ index: 0, id: `call_${requests.length}`, type: 'function', function: fn }] });
@@ -141,13 +160,26 @@ async function runAgentTurn(client: GatewayClient): Promise<Round[]> {
   const rounds: Round[] = [];
   while (rounds.length < 10) {
     const { action, messages } = guardToolLoop(history, GUARD_OPTIONS);
-    // Same request wiring as ChatRequestHandler, which can't load outside VS Code.
+    // Same request wiring as ChatRequestHandler, which can't load outside VS Code:
+    // a forced answer goes out without tools, then with tools and tool_choice 'none' if the server rejects that.
     const forceAnswer = action === 'forceAnswer';
-    const result = await streamReply(
-      client,
-      { model: 'loop-sim', messages, tools: [TOOL], tool_choice: forceAnswer ? 'none' : 'auto' },
-      { dropToolCalls: forceAnswer }
-    );
+    const send = (withTools: boolean): Promise<StreamResult> =>
+      streamReply(
+        client,
+        withTools
+          ? { model: 'loop-sim', messages, tools: [TOOL], tool_choice: forceAnswer ? 'none' : 'auto' }
+          : { model: 'loop-sim', messages },
+        { dropToolCalls: forceAnswer }
+      );
+    let result: StreamResult;
+    try {
+      result = await send(!forceAnswer);
+    } catch (error) {
+      if (!forceAnswer || !isToolHistoryRejection(error)) {
+        throw error;
+      }
+      result = await send(true);
+    }
     rounds.push({ action, ...result });
     if (result.toolCalls.length === 0) {
       break;
@@ -174,13 +206,31 @@ function sentLoopNote(request: OpenAIChatCompletionRequest): boolean {
 }
 
 describe('loop guard against a fake server', () => {
-  test('nudges, then forces a text-only answer when the same tool call keeps repeating', async () => {
+  test('nudges, then forces a text-only answer without tools when the same tool call keeps repeating', async () => {
     const server = await startServer('repeatToolCall');
     try {
       const rounds = await runAgentTurn(makeClient(server.url));
       assert.deepEqual(rounds.map((r) => r.action), ['none', 'none', 'none', 'nudge', 'nudge', 'forceAnswer']);
-      assert.deepEqual(server.requests.map((r) => r.tool_choice), ['auto', 'auto', 'auto', 'auto', 'auto', 'none']);
+      assert.deepEqual(server.requests.map((r) => r.tools?.length ?? 0), [1, 1, 1, 1, 1, 0]);
+      assert.deepEqual(server.requests.map((r) => r.tool_choice), ['auto', 'auto', 'auto', 'auto', 'auto', undefined]);
       assert.deepEqual(server.requests.map(sentLoopNote), [false, false, false, true, true, true]);
+      assert.deepEqual(rounds[rounds.length - 1].texts, ['Done looping.']);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test('resends the text-only round with tools and tool_choice none when the server rejects tool history without them', async () => {
+    const server = await startServer('rejectToolHistoryWithoutTools');
+    try {
+      const rounds = await runAgentTurn(makeClient(server.url));
+      assert.equal(rounds.length, 6);
+      assert.equal(server.requests.length, 7);
+      const [rejected, fallback] = server.requests.slice(5);
+      assert.equal(rejected.tools, undefined);
+      assert.equal(fallback.tools?.length, 1);
+      assert.equal(fallback.tool_choice, 'none');
+      assert.ok(sentLoopNote(fallback));
       assert.deepEqual(rounds[rounds.length - 1].texts, ['Done looping.']);
     } finally {
       await server.close();
@@ -195,6 +245,23 @@ describe('loop guard against a fake server', () => {
       assert.equal(rounds.length, 6);
       assert.equal(last.stats.droppedToolCalls, 1);
       assert.match(last.texts.join(''), /tried to call a tool again/);
+    } finally {
+      await server.close();
+    }
+  });
+
+  test('cuts a tool call the server returns as text on the text-only round', async () => {
+    const server = await startServer('repeatToolCallAsText');
+    try {
+      const rounds = await runAgentTurn(makeClient(server.url));
+      const last = rounds[rounds.length - 1];
+      assert.equal(rounds.length, 6);
+      assert.equal(last.action, 'forceAnswer');
+      assert.equal(last.stats.toolMarkupStopped, true);
+      assert.equal(last.toolCalls.length, 0);
+      const shown = last.texts.join('');
+      assert.ok(shown.startsWith('Let me try a broader search approach.\n\n*(Loop guard:'), shown);
+      assert.equal(shown.includes('<tool_call>'), false, shown);
     } finally {
       await server.close();
     }

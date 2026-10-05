@@ -134,7 +134,7 @@ export interface ToolLoopGuardOptions {
 }
 
 export interface ToolLoopGuard {
-  /** 'forceAnswer' means the request must send `tool_choice: 'none'` and withhold any tool call. */
+  /** 'forceAnswer' means the request must go out text-only (no tools, or tools with `tool_choice: 'none'`) and withhold any tool call. */
   readonly action: ToolLoopAction;
   readonly status: ToolLoopStatus;
   /** The request history, with the loop note appended once the guard fires. */
@@ -154,4 +154,16 @@ export function guardToolLoop(messages: OpenAIMessage[], options: ToolLoopGuardO
   }
   const note = buildToolLoopNote(status, action === 'forceAnswer');
   return { action, status, messages: appendToolLoopNudge(messages, note) };
+}
+
+/**
+ * A request-validation failure on a forced text-only round that left the
+ * tools out: some backends (Anthropic through a proxy, some chat templates)
+ * reject tool history without tool definitions, so the round must be resent
+ * with the tools and `tool_choice: 'none'`.
+ */
+export function isToolHistoryRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  // The client wraps the HTTP failure: 'Chat completion request failed: Chat completion failed: 400 ...'.
+  return /\bChat completion failed: (400|422)\b/.test(message);
 }

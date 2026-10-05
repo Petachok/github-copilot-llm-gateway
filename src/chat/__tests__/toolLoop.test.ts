@@ -6,6 +6,7 @@ import {
   buildToolLoopNote,
   countRepeatedToolRounds,
   guardToolLoop,
+  isToolHistoryRejection,
   resolveToolLoopAction,
 } from '../toolLoop';
 
@@ -206,5 +207,20 @@ describe('guardToolLoop', () => {
     const guard = guardToolLoop(looping, { ...options, canForceAnswer: false });
     assert.equal(guard.action, 'nudge');
     assert.match(lastContent(guard.messages), /will not produce new information/);
+  });
+});
+
+describe('isToolHistoryRejection', () => {
+  test('matches a request-validation failure from the chat endpoint', () => {
+    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: Chat completion failed: 400 Bad Request - {"error":"tools required"}')), true);
+    assert.equal(isToolHistoryRejection(new Error('Chat completion failed: 422 Unprocessable Entity - x')), true);
+  });
+
+  test('ignores other failures', () => {
+    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: Chat completion failed: 500 Internal Server Error - x')), false);
+    assert.equal(isToolHistoryRejection(new Error('Chat completion failed: 404 Not Found - x')), false);
+    assert.equal(isToolHistoryRejection(new Error('Chat completion request failed: fetch failed: ECONNREFUSED')), false);
+    assert.equal(isToolHistoryRejection(new Error('Inference server reported an error mid-stream: 400')), false);
+    assert.equal(isToolHistoryRejection('400'), false);
   });
 });

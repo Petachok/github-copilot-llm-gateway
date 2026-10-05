@@ -16,7 +16,7 @@ import {
 } from '../chat/tokenBudget';
 import { tryRepairJson } from '../chat/jsonRepair';
 import { fillMissingRequiredProperties } from '../chat/toolSchema';
-import { guardToolLoop } from '../chat/toolLoop';
+import { guardToolLoop, isToolHistoryRejection } from '../chat/toolLoop';
 import {
   StreamChunk,
   StreamReporter,
@@ -201,9 +201,12 @@ export class ChatRequestHandler {
     // (~93 tools, ~24K chars) would reserve context that gets thrown away by
     // buildToolsConfig() later — collapsing the user's prompt when tool
     // calling is disabled.
-    const { tools: filteredTools, schemas: toolSchemas } = this.buildToolsConfig(config, options);
-    const toolsSerializedLength = filteredTools ? JSON.stringify(filteredTools).length : 0;
-    // Tools stay in the request: some backends reject tool history without tool definitions.
+    const { tools: offeredTools, schemas: toolSchemas } = this.buildToolsConfig(config, options);
+    // A text-only round leaves the tools out: with them in the prompt a model
+    // that ignores tool_choice 'none' calls one anyway, and vLLM then streams
+    // the call as text. Backends that reject tool history without tool
+    // definitions get them back on a retry (see the catch below).
+    let withholdTools = loopGuard.forceAnswer;
     const toolChoice: ToolChoice | undefined = loopGuard.forceAnswer ? 'none' : this.mapToolChoice(options.toolMode);
 
     // Once anything has been streamed to the chat view we can no longer
@@ -222,6 +225,8 @@ export class ChatRequestHandler {
     // The whole budget → request → stream pipeline, resolved against the
     // model's current context size, so a corrected context can re-run it.
     const attempt = async (): Promise<void> => {
+      const filteredTools = withholdTools ? undefined : offeredTools;
+      const toolsSerializedLength = filteredTools ? JSON.stringify(filteredTools).length : 0;
       const modelMaxContext = catalog.resolveModelMaxContext(model);
       // Re-read per attempt: a context learned from an overflow error proves
       // the server enforces one combined limit, which flips this back to false.
@@ -363,15 +368,20 @@ export class ChatRequestHandler {
         // (issue #55: llama-server router mode reports nothing up-front, so
         // the first request can overshoot). Learn it and, if nothing has been
         // streamed to the chat view yet, transparently retry once with the
-        // corrected budget.
-        if (
-          !catalog.learnContextSizeFromError(model, error) ||
-          partsReported ||
-          token.isCancellationRequested
-        ) {
+        // corrected budget. A text-only round that was sent without tools
+        // likewise gets one retry with them when the server rejected it.
+        const learnedContext = catalog.learnContextSizeFromError(model, error);
+        if (partsReported || token.isCancellationRequested) {
           throw error;
         }
-        log('Retrying chat request with corrected context size...');
+        if (learnedContext) {
+          log('Retrying chat request with corrected context size...');
+        } else if (withholdTools && isToolHistoryRejection(error)) {
+          log("Loop guard: the server rejected the text-only request without tool definitions; retrying with the tools and tool_choice 'none'...");
+          withholdTools = false;
+        } else {
+          throw error;
+        }
         await attempt();
       }
       this.deps.onCompleted(model.id, modelName, capturedUsage);
@@ -581,7 +591,9 @@ export class ChatRequestHandler {
     if (stats.repetitionStopped) {
       log('WARNING: Loop guard stopped a response that kept repeating itself and closed the request.');
     }
-    if (stats.droppedToolCalls) {
+    if (stats.toolMarkupStopped) {
+      log("WARNING: Loop guard cut a text-only round where the model wrote a tool call as plain text; the server skipped its tool parser under tool_choice 'none'.");
+    } else if (stats.droppedToolCalls) {
       log(`WARNING: Loop guard withheld ${stats.droppedToolCalls} tool call(s) from a text-only round; the server ignored tool_choice 'none'.`);
     }
   }

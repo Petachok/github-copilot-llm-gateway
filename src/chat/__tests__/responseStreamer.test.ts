@@ -167,6 +167,67 @@ describe('streamResponse tool-call withholding', () => {
       ['Here is what I found.']
     );
   });
+
+  test('cuts the reply where a tool call arrives as text, hangs up, and explains', async () => {
+    const { reporter, events } = makeReporter();
+    let produced = 0;
+    let closed = false;
+    // vLLM under tool_choice 'none': the model's native markup streams as content.
+    const pieces = ['Let me try a broader ', 'search approach.<tool_', 'call>grep_search\n<arg_key>includePattern', '</arg_key>\n</tool_call>', ...Array.from({ length: 50 }, () => 'more')];
+    async function* asText(): AsyncIterable<StreamChunk> {
+      try {
+        for (; produced < pieces.length; produced++) {
+          yield { content: pieces[produced] };
+        }
+      } finally {
+        closed = true;
+      }
+    }
+    const stats = await streamResponse({
+      chunks: asText(),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      dropToolCalls: true,
+    });
+    assert.equal(stats.toolMarkupStopped, true);
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.equal(stats.totalToolCalls, 0);
+    assert.ok(produced < pieces.length, `consumed all ${produced} chunks`);
+    assert.equal(closed, true);
+    const texts = events.filter((e) => e.kind === 'text').map((e) => e.value ?? '');
+    assert.equal(texts.slice(0, -1).join(''), 'Let me try a broader search approach.');
+    assert.match(texts[texts.length - 1], /^\n\n.*tried to call a tool again/);
+    assert.equal(texts.join('').includes('<tool_call>'), false);
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('explains without a leading break when the markup is all the model said', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ content: '<tool_call>read_file\n<arg_key>filePath</arg_key>\n</tool_call>' }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      dropToolCalls: true,
+    });
+    assert.equal(stats.toolMarkupStopped, true);
+    const texts = events.filter((e) => e.kind === 'text').map((e) => e.value ?? '');
+    assert.equal(texts.length, 1);
+    assert.match(texts[0], /^\*\(Loop guard: tools were disabled/);
+  });
+
+  test('leaves tool-call markup in the text when tools are allowed', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ content: 'Qwen writes <tool_' }, { content: 'call> before the JSON.' }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+    });
+    assert.ok(!stats.toolMarkupStopped);
+    assert.equal(events.filter((e) => e.kind === 'text').map((e) => e.value).join(''), 'Qwen writes <tool_call> before the JSON.');
+  });
 });
 
 describe('streamResponse', () => {
