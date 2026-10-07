@@ -157,9 +157,12 @@ export function resolveToolLoopAction(count: number, nudgeAfter: number, blockAf
 export function buildToolLoopNote(status: ToolLoopStatus, block: boolean): string {
   const seen = `[Loop guard] You have ${describeToolLoop(status)} with identical arguments and received identical results.`;
   const plural = status.calls.length > 1;
-  return block
-    ? `${seen} ${plural ? 'Those exact calls are' : 'That exact call is'} now blocked and will not run again. Use the results you already have, call a different tool or use different arguments, or answer the user.`
-    : `${seen} Repeating ${plural ? 'them' : 'the call'} will not produce new information. Use the results you already have, try a different approach, or answer the user.`;
+  if (block) {
+    const subject = plural ? 'Those exact calls are' : 'That exact call is';
+    return `${seen} ${subject} now blocked and will not run again. Use the results you already have, call a different tool or use different arguments, or answer the user.`;
+  }
+  const object = plural ? 'them' : 'the call';
+  return `${seen} Repeating ${object} will not produce new information. Use the results you already have, try a different approach, or answer the user.`;
 }
 
 /**
