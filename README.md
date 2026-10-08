@@ -385,10 +385,12 @@ VS Code does **not** let bring-your-own-key models power its own inline ("ghost 
 **Requirements & notes:**
 
 - For true **fill-in-the-middle (FIM)**, your server must support the `/v1/completions` `suffix` parameter (llama.cpp, LM Studio, and most local servers do). The text before the cursor is sent as `prompt` and the text after as `suffix`.
-- Servers that reject the `suffix` parameter — notably **vLLM** (`400 "suffix is not currently supported"`) and **LiteLLM** (`"suffix: Extra inputs are not permitted"`) — are detected automatically: the extension falls back to **prefix-only** completions (plain continuation of the code before the cursor) for the rest of the session. Completions still work, but the model can't see the code after the cursor.
+- Servers that reject the `suffix` parameter — notably **vLLM** (`400 "suffix is not currently supported"`), **LiteLLM** (`"suffix: Extra inputs are not permitted"`) and **Azure OpenAI** (`"Unrecognized request argument supplied: suffix"`) — are detected automatically: the extension falls back to **prefix-only** completions (plain continuation of the code before the cursor) for the rest of the session. Completions still work, but the model can't see the code after the cursor.
 - Point **Inline Completion Model** at a code/FIM or `*-base` model for best results — chat-tuned models tend to be slower and chattier for raw completion.
 - If you already use GitHub Copilot's inline suggestions, leave this **off** to avoid two providers competing for the same ghost text.
-- Completions are best-effort: server errors or timeouts simply yield no suggestion (details go to the output channel) rather than interrupting you.
+- Completions are best-effort: server errors or timeouts simply yield no suggestion (details go to the output channel) rather than interrupting you. Requests cancelled because you kept typing are not logged as failures, and a timeout is reported once with a hint about what to change.
+
+**Troubleshooting timeouts (e.g. chat or reasoning models via LiteLLM):** the default 3000 ms timeout suits small local FIM models. Chat and reasoning models (GPT-style deployments on Azure, for example) are often far slower, so raise **Inline Completion Timeout** substantially (e.g. `15000` or more). These models may also reject the fixed low `temperature` the extension sends — set `drop_params: true` in LiteLLM if so. For responsive ghost text, a small FIM / `*-base` code model is still recommended. Turn on **Verbose Logging** to see each inline request (model, prompt size, `max_tokens`, timeout) and its outcome (latency, characters returned, or `finish_reason` when the model returned nothing).
 
 ### Using Gateway Models for Titles & Other Utility Tasks
 
