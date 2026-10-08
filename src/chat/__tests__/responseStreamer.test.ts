@@ -49,6 +49,167 @@ const identityArgs = (tc: { arguments: string }): Record<string, unknown> => {
   }
 };
 
+describe('streamResponse repetition guard', () => {
+  const LOOP = 'I need to re-read the file before I can answer this. ';
+
+  test('stops a repeating response, closes the upstream stream, and explains', async () => {
+    const { reporter, events } = makeReporter();
+    let produced = 0;
+    let closed = false;
+    async function* looping(): AsyncIterable<StreamChunk> {
+      try {
+        for (; produced < 500; produced++) {
+          yield { content: LOOP };
+        }
+      } finally {
+        closed = true;
+      }
+    }
+    const stats = await streamResponse({
+      chunks: looping(),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    assert.ok(produced < 500, `consumed all ${produced} chunks`);
+    assert.equal(closed, true);
+    const last = events[events.length - 1];
+    assert.equal(last.kind, 'text');
+    assert.match(last.value ?? '', /repeating/);
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('closes a looping reasoning block before the note, with no budget fallback', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter(Array.from({ length: 200 }, () => ({ reasoning_content: LOOP }))),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+      maxOutputTokens: 1000,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    const texts = events.filter((e) => e.kind === 'text');
+    assert.equal(texts.length, 1);
+    assert.match(texts[0].value ?? '', /repeating/);
+    const doneIndex = events.findIndex((e) => e.kind === 'thinkingDone');
+    assert.ok(doneIndex >= 0 && doneIndex < events.indexOf(texts[0]));
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('stopping inside a <think> block does not add the budget fallback', async () => {
+    const { reporter, events } = makeReporter();
+    const chunks: StreamChunk[] = [{ content: '<think>' }, ...Array.from({ length: 200 }, () => ({ content: LOOP }))];
+    const stats = await streamResponse({
+      chunks: iter(chunks),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      detectRepetition: true,
+    });
+    assert.equal(stats.repetitionStopped, true);
+    const texts = events.filter((e) => e.kind === 'text');
+    assert.equal(texts.length, 1);
+    assert.doesNotMatch(texts[0].value ?? '', /budget/);
+  });
+
+  test('does not stop when detection is off', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter(Array.from({ length: 100 }, () => ({ content: LOOP }))),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+    });
+    assert.ok(!stats.repetitionStopped);
+    assert.equal(events.filter((e) => e.kind === 'text').length, 100);
+  });
+});
+
+describe('streamResponse tool-call withholding', () => {
+  const repeat = { id: 'c1', name: 'read_file', arguments: '{"filePath":"a.ts"}' };
+  const other = { id: 'c2', name: 'grep_search', arguments: '{"query":"plan"}' };
+  const blockRepeat = (name: string, args: Record<string, unknown>): boolean => name === 'read_file' && args.filePath === 'a.ts';
+
+  test('withholds the blocked repeat and explains when it was all the model did', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ finished_tool_calls: [repeat] }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      withholdToolCall: blockRepeat,
+    });
+    assert.equal(stats.totalToolCalls, 0);
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.equal(events.some((e) => e.kind === 'toolCall'), false);
+    const texts = events.filter((e) => e.kind === 'text').map((e) => e.value ?? '');
+    assert.equal(texts.length, 1);
+    assert.match(texts[0], /^\*\(Loop guard: the model made the blocked tool call again/);
+    assert.equal(isEmptyStreamResult(stats), false);
+  });
+
+  test('lets a different call through alongside the withheld repeat, with no note', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ content: 'Let me look at the plan instead.' }, { finished_tool_calls: [repeat, other] }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      withholdToolCall: blockRepeat,
+    });
+    assert.equal(stats.totalToolCalls, 1);
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.deepEqual(events.filter((e) => e.kind === 'toolCall').map((e) => e.name), ['grep_search']);
+    assert.deepEqual(events.filter((e) => e.kind === 'text').map((e) => e.value), ['Let me look at the plan instead.']);
+  });
+
+  test('passes the same tool with different arguments', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ finished_tool_calls: [{ id: 'c3', name: 'read_file', arguments: '{"filePath":"b.ts"}' }] }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      withholdToolCall: blockRepeat,
+    });
+    assert.equal(stats.totalToolCalls, 1);
+    assert.equal(stats.droppedToolCalls, undefined);
+    assert.equal(events.filter((e) => e.kind === 'toolCall').length, 1);
+  });
+
+  test('adds the note after text when the only call was the withheld repeat', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ content: 'Reading the file once more.' }, { finished_tool_calls: [repeat] }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: identityArgs,
+      withholdToolCall: blockRepeat,
+    });
+    assert.equal(stats.droppedToolCalls, 1);
+    const texts = events.filter((e) => e.kind === 'text').map((e) => e.value ?? '');
+    assert.equal(texts[0], 'Reading the file once more.');
+    assert.match(texts[1], /^\n\n\*\(Loop guard: the model made the blocked tool call again/);
+  });
+
+  test('matches on the repaired arguments', async () => {
+    const { reporter, events } = makeReporter();
+    const stats = await streamResponse({
+      chunks: iter([{ finished_tool_calls: [{ id: 'c4', name: 'read_file', arguments: '{"filePath":"a.ts"' }] }]),
+      reporter,
+      isCancelled: () => false,
+      resolveToolCallArgs: () => ({ filePath: 'a.ts' }),
+      withholdToolCall: blockRepeat,
+    });
+    assert.equal(stats.droppedToolCalls, 1);
+    assert.equal(events.some((e) => e.kind === 'toolCall'), false);
+  });
+});
+
 describe('streamResponse', () => {
   test('reports plain text content', async () => {
     const { reporter, events } = makeReporter();

@@ -79,4 +79,12 @@ export interface GatewayConfig {
   usageWarningPercent: number;
   /** Remaining-quota percent at or below which the status bar turns red. */
   usageCriticalPercent: number;
+  /** Stop a streamed response once it degenerates into an exact repeating cycle. */
+  loopGuardRepetition: boolean;
+  /** Master switch for the tool-call loop guard (nudge and block). */
+  loopGuardToolCalls: boolean;
+  /** Warn the model after this many tool rounds repeating the same call or short cycle (same arguments, same results); 0 = off. */
+  loopGuardToolNudgeAfter: number;
+  /** Withhold a repeat of the looping call(s) after this many such rounds; 0 = off. */
+  loopGuardToolBlockAfter: number;
 }

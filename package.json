@@ -319,6 +319,32 @@
           "maximum": 100,
           "markdownDescription": "The status bar turns **red** when the remaining daily tokens are at or below this percentage of the daily limit. `0` means red only once the limit is reached (it is always red then).",
           "order": 26
+        },
+        "github.copilot.llm-gateway.loopGuardRepetition": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Stop a response when the model gets stuck repeating the same text or thinking over and over, close the request so the server stops generating, and add a short note explaining why. An explicit request to repeat something many times will also be cut off — turn this off if you need that.",
+          "order": 27
+        },
+        "github.copilot.llm-gateway.loopGuardToolCalls": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Catch agent tool-call loops: the model making the same tool call with the same arguments and getting the same result round after round, or cycling through a short sequence of such calls. First it is warned through the tool result (**Loop Guard Tool Nudge After**), then the repeated call is blocked while any other call still runs (**Loop Guard Tool Block After**). Turn this off to disable both.",
+          "order": 28
+        },
+        "github.copilot.llm-gateway.loopGuardToolNudgeAfter": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "markdownDescription": "When the model makes the same tool call with the same arguments and gets the same result this many times in a row — or cycles through a short sequence of such calls (A, B, A, B, …) for this many rounds — add a warning to the tool result telling it to use what it has or change approach. `0` turns this off; values below `2` also turn it off.",
+          "order": 29
+        },
+        "github.copilot.llm-gateway.loopGuardToolBlockAfter": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "markdownDescription": "When the same tool call — or the same short cycle of tool calls — repeats for this many rounds with identical results, block those exact calls (same tool, same arguments): the model is told so in the tool result, a note is shown in the chat, and if it makes one of them again it is withheld. Any other tool call still goes through, so the agent can change approach and keep working; if the model only repeats blocked calls, the reply ends. `0` turns this off; values below `2` also turn it off.",
+          "order": 30
         }
       }
     }

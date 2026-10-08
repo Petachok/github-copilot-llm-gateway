@@ -9,6 +9,7 @@
  */
 
 import { ThinkingParser, ThinkingChunk } from './thinking';
+import { RepetitionDetector } from './repetitionDetector';
 import { OpenAIUsage, OpenAIUsageAvailability } from '../api/types';
 
 export interface StreamReporter {
@@ -55,6 +56,10 @@ export interface StreamStats {
    * `isEmptyStreamResult` treats it as handled, like `thinkingForceClosed`.
    */
   outputTruncated?: boolean;
+  /** True when the loop guard cut the stream because the output became a repeating cycle. */
+  repetitionStopped?: boolean;
+  /** Tool calls withheld by `withholdToolCall` (the loop guard's blocked repeat). */
+  droppedToolCalls?: number;
   /**
    * True once a usage frame has been dispatched to the reporter. Internal
    * book-keeping to dedupe re-emitted totals from chatty servers; optional
@@ -80,7 +85,20 @@ export interface StreamResponseParams {
    * the model exhausts it without producing an answer.
    */
   maxOutputTokens?: number;
+  /** Stop the stream once text or thinking degenerates into a repeating cycle. */
+  detectRepetition?: boolean;
+  /** Return true to withhold a tool call (after argument repair) instead of reporting it. */
+  withholdToolCall?: (name: string, args: Record<string, unknown>) => boolean;
 }
+
+const REPETITION_STOP_NOTE =
+  '\n\n*(Stopped: the model kept repeating the same output, so the response was cut off. ' +
+  'Ask it to continue or rephrase the request. Turn this off with ' +
+  '`github.copilot.llm-gateway.loopGuardRepetition`.)*';
+
+const BLOCKED_TOOL_CALL_NOTE =
+  '*(Loop guard: the model made the blocked tool call again instead of changing approach, so this reply ends here. ' +
+  'Send a follow-up with a hint on how to proceed, or adjust `github.copilot.llm-gateway.loopGuardToolBlockAfter`.)*';
 
 const THOUSANDS_FORMAT = new Intl.NumberFormat('en-US', { useGrouping: true });
 
@@ -141,11 +159,11 @@ function reportParserPiece(
 function processStreamChunk(
   chunk: StreamChunk,
   parser: ThinkingParser,
-  reporter: StreamReporter,
   stats: StreamStats,
   inReasoningField: boolean,
-  resolveToolCallArgs: StreamResponseParams['resolveToolCallArgs']
+  params: StreamResponseParams
 ): boolean {
+  const { reporter } = params;
   if (chunk.reasoning_content) {
     stats.hadThinking = true;
     inReasoningField = true;
@@ -164,11 +182,7 @@ function processStreamChunk(
   }
 
   if (chunk.finished_tool_calls?.length) {
-    for (const toolCall of chunk.finished_tool_calls) {
-      stats.totalToolCalls++;
-      const args = resolveToolCallArgs(toolCall);
-      reporter.reportToolCall(toolCall.id, toolCall.name, args);
-    }
+    reportToolCalls(chunk.finished_tool_calls, stats, params);
   }
 
   if (chunk.finish_reason) {
@@ -186,13 +200,66 @@ function processStreamChunk(
   return inReasoningField;
 }
 
+function reportToolCalls(
+  toolCalls: NonNullable<StreamChunk['finished_tool_calls']>,
+  stats: StreamStats,
+  params: StreamResponseParams
+): void {
+  for (const toolCall of toolCalls) {
+    const args = params.resolveToolCallArgs(toolCall);
+    if (params.withholdToolCall?.(toolCall.name, args)) {
+      stats.droppedToolCalls = (stats.droppedToolCalls ?? 0) + 1;
+      continue;
+    }
+    stats.totalToolCalls++;
+    params.reporter.reportToolCall(toolCall.id, toolCall.name, args);
+  }
+}
+
+function streamedText(chunk: StreamChunk): string {
+  return (chunk.reasoning_content ?? '') + (chunk.content ?? '');
+}
+
+/** Emit the note that explains a stopped or empty reply, when one is needed. */
+function reportStreamEnd(stats: StreamStats, params: StreamResponseParams): void {
+  const { reporter } = params;
+  // A mid-<think> stop sets thinkingForceClosed; the budget note would misreport it.
+  if (stats.repetitionStopped) {
+    reporter.reportText(REPETITION_STOP_NOTE);
+    return;
+  }
+  if (params.isCancelled()) {
+    return;
+  }
+
+  // A withheld repeat with no other call ends the agent turn, which needs explaining even after some text.
+  if (stats.droppedToolCalls && stats.totalToolCalls === 0) {
+    reporter.reportText(stats.totalTextParts === 0 ? BLOCKED_TOOL_CALL_NOTE : `\n\n${BLOCKED_TOOL_CALL_NOTE}`);
+    return;
+  }
+  if (stats.totalTextParts > 0 || stats.totalToolCalls > 0) {
+    return;
+  }
+
+  // If the model spent all its output budget before producing any visible
+  // text or tool calls, emit a fallback message so the Copilot Chat UI has
+  // something to render. Two signals: an unclosed `<think>` block at
+  // end-of-stream (servers that inline thinking in `content`), or an explicit
+  // `finish_reason: length` (servers that split it into `reasoning_content`,
+  // where the parser never sees a tag to force-close).
+  stats.outputTruncated = stats.finishReason === 'length';
+  if (stats.thinkingForceClosed || stats.outputTruncated) {
+    reporter.reportText(buildOutputBudgetFallback(stats.hadThinking, params.maxOutputTokens));
+  }
+}
+
 /**
  * Consume an async stream of chat completion chunks, dispatching pieces to
  * the reporter as they arrive. Returns aggregate stats that the caller can
  * use to decide whether the response was empty and needs an error fallback.
  */
 export async function streamResponse(params: StreamResponseParams): Promise<StreamStats> {
-  const { chunks, reporter, isCancelled, resolveToolCallArgs, maxOutputTokens } = params;
+  const { chunks, reporter, isCancelled } = params;
 
   const stats: StreamStats = {
     totalContentLength: 0,
@@ -204,15 +271,18 @@ export async function streamResponse(params: StreamResponseParams): Promise<Stre
   };
 
   const parser = new ThinkingParser();
+  const detector = params.detectRepetition ? new RepetitionDetector() : undefined;
   let inReasoningField = false;
 
   for await (const chunk of chunks) {
     if (isCancelled()) {
       break;
     }
-    inReasoningField = processStreamChunk(
-      chunk, parser, reporter, stats, inReasoningField, resolveToolCallArgs
-    );
+    inReasoningField = processStreamChunk(chunk, parser, stats, inReasoningField, params);
+    if (detector?.push(streamedText(chunk))) {
+      stats.repetitionStopped = true;
+      break;
+    }
   }
 
   // Flush any remaining buffered content. 'E' pieces here signal that the
@@ -225,35 +295,24 @@ export async function streamResponse(params: StreamResponseParams): Promise<Stre
     reporter.reportThinkingDone();
   }
 
-  // If the model spent all its output budget before producing any visible
-  // text or tool calls, emit a fallback message so the Copilot Chat UI has
-  // something to render. Two signals: an unclosed `<think>` block at
-  // end-of-stream (servers that inline thinking in `content`), or an explicit
-  // `finish_reason: length` (servers that split it into `reasoning_content`,
-  // where the parser never sees a tag to force-close).
-  const nothingVisible = stats.totalTextParts === 0 && stats.totalToolCalls === 0;
-  if (nothingVisible && !isCancelled()) {
-    stats.outputTruncated = stats.finishReason === 'length';
-    if (stats.thinkingForceClosed || stats.outputTruncated) {
-      reporter.reportText(buildOutputBudgetFallback(stats.hadThinking, maxOutputTokens));
-    }
-  }
-
+  reportStreamEnd(stats, params);
   return stats;
 }
 
 /**
  * Determine whether a completed stream should be treated as empty (and thus
  * needs an error fallback message). Thinking content is not a visible response
- * for VS Code's purposes. Force-closed thinking and an exhausted output
- * budget are excluded because streamResponse already emits its dedicated
- * fallback text for them.
+ * for VS Code's purposes. Force-closed thinking, an exhausted output budget
+ * and a loop-guard stop are excluded because streamResponse already emits its
+ * dedicated fallback text for them.
  */
 export function isEmptyStreamResult(stats: StreamStats): boolean {
   return (
     stats.totalTextParts === 0 &&
     stats.totalToolCalls === 0 &&
     !stats.thinkingForceClosed &&
-    !stats.outputTruncated
+    !stats.outputTruncated &&
+    !stats.repetitionStopped &&
+    !stats.droppedToolCalls
   );
 }

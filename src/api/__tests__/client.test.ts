@@ -41,6 +41,10 @@ const streamTestConfig = {
   usageCriticalPercent: 0,
   thinkingEffortParameter: 'reasoning_effort',
   thinkingEffortPicker: 'auto',
+  loopGuardRepetition: true,
+  loopGuardToolCalls: true,
+  loopGuardToolNudgeAfter: 3,
+  loopGuardToolBlockAfter: 5,
 } as unknown as import('../../config/gatewayConfig').GatewayConfig;
 
 const streamTestToken = {
@@ -331,6 +335,51 @@ describe('streamChatCompletion reasoning field handling (issue #59)', () => {
       'data: [DONE]',
     ]);
     assert.deepEqual(reasoning, ['thought']);
+  });
+
+  test('aborts the HTTP request when the consumer stops reading early', async () => {
+    const originalFetch = globalThis.fetch;
+    let signal: AbortSignal | undefined;
+    globalThis.fetch = async (_input: unknown, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return sseResponse([
+        'data: {"choices":[{"delta":{"content":"one"}}]}',
+        'data: {"choices":[{"delta":{"content":"two"}}]}',
+        'data: [DONE]',
+      ]);
+    };
+    try {
+      const client = new GatewayClient(streamTestConfig);
+      for await (const chunk of client.streamChatCompletion({ model: 'm', messages: [] }, streamTestToken)) {
+        if (chunk.content) { break; }
+      }
+      assert.equal(signal?.aborted, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('names the timeout that fired instead of a bare "operation was aborted"', async () => {
+    const originalFetch = globalThis.fetch;
+    // A real abort rejects with `signal.reason`; mirror that so the test
+    // exercises the message the user actually sees.
+    globalThis.fetch = (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+      });
+    try {
+      const client = new GatewayClient({ ...streamTestConfig, requestTimeout: 20 });
+      await assert.rejects(
+        async () => {
+          for await (const _chunk of client.streamChatCompletion({ model: 'm', messages: [] }, streamTestToken)) {
+            // unreachable
+          }
+        },
+        /did not start responding within 20 ms \(github\.copilot\.llm-gateway\.requestTimeout\)/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

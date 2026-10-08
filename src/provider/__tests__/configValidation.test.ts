@@ -44,6 +44,10 @@ function baseConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     usageCriticalPercent: 0,
     thinkingEffortParameter: 'reasoning_effort',
     thinkingEffortPicker: 'auto',
+    loopGuardRepetition: true,
+    loopGuardToolCalls: true,
+    loopGuardToolNudgeAfter: 3,
+    loopGuardToolBlockAfter: 5,
     ...overrides,
   };
 }

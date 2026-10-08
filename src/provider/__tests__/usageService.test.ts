@@ -37,6 +37,10 @@ function fakeConfig(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
     usageRefreshInterval: 300,
     usageWarningPercent: 20,
     usageCriticalPercent: 0,
+    loopGuardRepetition: true,
+    loopGuardToolCalls: true,
+    loopGuardToolNudgeAfter: 3,
+    loopGuardToolBlockAfter: 5,
     ...overrides,
   };
 }

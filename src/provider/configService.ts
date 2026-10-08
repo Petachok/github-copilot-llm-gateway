@@ -93,6 +93,10 @@ export class ConfigService {
         'usageCriticalPercent',
         DEFAULT_USAGE_THRESHOLDS.criticalPercent
       ),
+      loopGuardRepetition: config.get<boolean>('loopGuardRepetition', true),
+      loopGuardToolCalls: config.get<boolean>('loopGuardToolCalls', true),
+      loopGuardToolNudgeAfter: config.get<number>('loopGuardToolNudgeAfter', 3),
+      loopGuardToolBlockAfter: config.get<number>('loopGuardToolBlockAfter', 5),
     };
   }
 
